@@ -1,0 +1,25 @@
+FROM ollama/ollama:latest
+
+# Install Python dependencies
+RUN apt-get update && apt-get install -y python3 python3-pip curl && \
+    pip install --no-cache-dir fastapi uvicorn[standard] requests
+
+# Create app directory
+WORKDIR /app
+
+# Copy files
+COPY app.py /app/app.py
+COPY requirements.txt /app/requirements.txt
+
+# Expose port
+EXPOSE 7860
+
+# Set environment for Ollama
+ENV OLLAMA_HOST=0.0.0.0:11434
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:7860/health || exit 1
+
+# Run app
+CMD ["python3", "/app/app.py"]

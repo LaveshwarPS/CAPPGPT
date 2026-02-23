@@ -1,0 +1,8 @@
+﻿venv312/
+.venv/
+unusedlegacyfiles/
+BACKUP/
+dist/
+build/
+*.zip
+*.exe
