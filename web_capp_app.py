@@ -240,12 +240,12 @@ def main() -> None:
     set_provider("gemini")
 
     st.set_page_config(
-        page_title="CAPP Turning Planner - Web",
+        page_title="CAPPGPT",
         page_icon="ðŸ› ï¸",
         layout="wide",
     )
     _init_state()
-    st.markdown("### CAPP Turning")
+    st.markdown("### CAPPGPT")
     st.markdown(
         """
         <style>
