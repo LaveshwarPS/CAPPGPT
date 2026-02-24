@@ -105,11 +105,26 @@ def _build_chat_context(result: Dict) -> str:
         for tool in tools[:6]
     )
     return (
-        "You are a CAPP turning assistant. Use this plan context:\n"
+        "You are a strict CAPP turning assistant.\n"
+        "Scope is ONLY: turning-based process planning and mechanical engineering.\n"
+        "If asked about unrelated topics, refuse briefly and ask a turning/mechanical question.\n"
+        "Use this plan context:\n"
         f"Turning score: {result.get('turning_score')}\n"
         f"Operations:\n{top_ops}\n"
         f"Tools:\n{top_tools}\n"
     )
+
+
+def _is_turning_mechanical_query(question: str) -> bool:
+    q = (question or "").lower()
+    keywords = {
+        "turn", "lathe", "capp", "machin", "machine", "tool", "insert", "cnc",
+        "rpm", "feed", "doc", "rough", "finish", "boring", "thread", "groov",
+        "parting", "coolant", "tolerance", "ra", "surface finish", "fixtur",
+        "chuck", "cad", "step", "shaft", "diameter", "spindle", "mechanical",
+        "manufactur", "milling", "grinding", "engineering",
+    }
+    return any(k in q for k in keywords)
 
 
 def _operations_table_rows(result: Dict) -> List[Dict]:
@@ -417,7 +432,7 @@ def main() -> None:
             st.info("Run analysis to see turning limitations and process guidance.")
 
     with tab_chat:
-        st.caption("Ask about process planning, tools, speeds/feeds, or improvements.")
+        st.caption("Chat scope: turning-based CAPP and mechanical engineering only.")
         for msg in st.session_state.chat_history:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
@@ -430,12 +445,18 @@ def main() -> None:
 
             if not result:
                 answer = "Upload and analyze a STEP file first, then I can answer with context."
+            elif not _is_turning_mechanical_query(question):
+                answer = (
+                    "I can only answer turning-based CAPP and mechanical engineering questions. "
+                    "Please ask about operations, tooling, speeds/feeds, tolerance, finish, or process planning."
+                )
             else:
                 prompt = (
                     _build_chat_context(result)
                     + "\nUser question:\n"
                     + question
-                    + "\nRespond briefly with practical machining guidance."
+                    + "\nRespond briefly with practical turning/mechanical guidance. "
+                      "If the question is outside scope, refuse."
                 )
                 try:
                     answer = query_ollama(prompt, model=model, timeout=OLLAMA_AI_TIMEOUT)
