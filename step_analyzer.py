@@ -491,12 +491,15 @@ def analyze_machinability(shape, ocp_modules):
     xy_delta_ratio = abs(x_size - y_size) / radial_size
     aspect_ratio = z_size / radial_size
 
+    complexity_ratio = complex_surfaces / total_surfaces
     strict_checks = {
-        "axisymmetric_xy": xy_delta_ratio <= 0.15,
-        "cylindrical_dominance": cylindrical_ratio >= 0.35 or surface_types["Cylinder"] >= 6,
-        "circular_edge_support": circular_edge_ratio >= 0.25 or edge_types["Circle"] >= 8,
-        "limited_complexity": complex_surfaces <= 6,
-        "reasonable_aspect_ratio": 0.3 <= aspect_ratio <= 8.0,
+        # Many imported STEP files are not perfectly axis-aligned; keep this strict but realistic.
+        "axisymmetric_xy": xy_delta_ratio <= 0.25,
+        "cylindrical_dominance": cylindrical_ratio >= 0.20 or surface_types["Cylinder"] >= 8,
+        "circular_edge_support": circular_edge_ratio >= 0.06 or edge_types["Circle"] >= 10,
+        # Allow moderate freeform detail; block only when freeform dominates most of the part.
+        "limited_complexity": not (complex_surfaces > 40 and complexity_ratio > 0.75),
+        "reasonable_aspect_ratio": 0.2 <= aspect_ratio <= 12.0,
     }
 
     if strict_checks["axisymmetric_xy"]:
@@ -522,10 +525,10 @@ def analyze_machinability(shape, ocp_modules):
 
     if strict_checks["limited_complexity"]:
         turning_score += 12
-        turning_reasons.append(f"Complex surface count is manageable ({complex_surfaces}).")
+        turning_reasons.append(f"Complexity is acceptable ({complex_surfaces} freeform surfaces, ratio {complexity_ratio:.2f}).")
     else:
         turning_score -= 20
-        turning_reasons.append(f"Too many complex/freeform surfaces for strict turning ({complex_surfaces}).")
+        turning_reasons.append(f"Too many complex/freeform surfaces for strict turning ({complex_surfaces}, ratio {complexity_ratio:.2f}).")
 
     if strict_checks["reasonable_aspect_ratio"]:
         turning_score += 10
@@ -535,7 +538,15 @@ def analyze_machinability(shape, ocp_modules):
         turning_reasons.append(f"Aspect ratio {aspect_ratio:.2f}:1 is outside strict turning range.")
 
     turning_score = max(0, min(100, turning_score + 20))
-    strict_turnable = all(strict_checks.values()) and turning_score >= 75
+    # Primary gate: must satisfy rotational geometry checks and not be overwhelmingly freeform.
+    strict_turnable = (
+        strict_checks["axisymmetric_xy"]
+        and strict_checks["cylindrical_dominance"]
+        and strict_checks["circular_edge_support"]
+        and strict_checks["reasonable_aspect_ratio"]
+        and strict_checks["limited_complexity"]
+        and turning_score >= 68
+    )
     if strict_turnable:
         turning_reasons.append("Strict turning gate passed: geometry qualifies for CAPP turning workflow.")
     else:
