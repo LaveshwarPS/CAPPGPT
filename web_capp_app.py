@@ -1,4 +1,4 @@
-"""Web version of CAPP Turning Planner using Streamlit.
+﻿"""Web version of CAPP Turning Planner using Streamlit.
 
 Run:
     streamlit run web_capp_app.py
@@ -23,7 +23,7 @@ from capp_turning_planner import (
     TOP_MATERIALS_INDIA,
     TOP_MACHINE_PROFILES_INDIA,
 )
-from chat_ollama import query_ollama, OllamaError, get_provider, set_provider
+from chat_ollama import query_ollama, OllamaError, set_provider
 
 
 OLLAMA_AI_TIMEOUT = int(os.getenv("OLLAMA_AI_TIMEOUT", "120"))
@@ -190,16 +190,18 @@ def main() -> None:
 
     st.set_page_config(
         page_title="CAPP Turning Planner - Web",
-        page_icon="🛠️",
+        page_icon="ðŸ› ï¸",
         layout="wide",
     )
     _init_state()
-
-    st.title("🛠️ CAPP Turning Process Planner")
-    st.caption("Upload STEP files and generate optimized turning process plans.")
+    st.markdown("### CAPP Turning")
     st.markdown(
         """
         <style>
+            .block-container {
+                padding-top: 0.75rem;
+                padding-bottom: 1rem;
+            }
             [data-testid="stDataFrame"] thead th div {
                 white-space: nowrap;
             }
@@ -257,9 +259,6 @@ def main() -> None:
             format="%.2f",
         )
         model = GEMINI_MODEL
-        st.markdown("AI Model: `Gemini`")
-        st.markdown(f"Provider: `{get_provider()}`")
-        st.markdown(f"Model ID: `{model}`")
         analyze = st.button("Analyze & Generate Plan", use_container_width=True, type="primary")
 
     if analyze:
@@ -409,3 +408,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
