@@ -166,8 +166,10 @@ class TurningProcessPlan:
         self.machine_profile = machine_profile
         self.tolerance_mm = tolerance_mm
         self.surface_roughness_ra = surface_roughness_ra
+        turning_data = self.analysis.get("machinability", {}).get("turning", {})
         self.turning_score = self._get_turning_score()
-        self.is_machinable = self.turning_score >= 40  # Minimum threshold
+        self.strict_turnable = bool(turning_data.get("strict_turnable", self.turning_score >= 75))
+        self.is_machinable = self.strict_turnable
         self.operations = []
         self.tools = []
         self.ai_recommendations = {}
@@ -984,13 +986,20 @@ def generate_turning_plan(
     
     # Check if machinable for turning
     if not plan.is_machinable:
-        print(f"  âŒ Part NOT suitable for turning (score: {plan.turning_score}/100)")
-        print("  âš ï¸  This part is better suited for other manufacturing methods")
+        recommended = analysis.get("recommended_process", "3_axis_milling")
+        alternatives = analysis.get("alternative_processes", [])
+        turning_reasons = analysis.get("machinability", {}).get("turning", {}).get("reasons", [])
+        print(f"  âŒ Part NOT strictly suitable for turning (score: {plan.turning_score}/100)")
+        print(f"  âš ï¸  Recommended process: {recommended}")
         return {
             "success": False,
-            "error": "Part not suitable for turning",
+            "error": "Part is not strictly turnable for CAPP turning workflow.",
             "turning_score": plan.turning_score,
-            "recommendation": "Consider 3-axis milling or 3D printing instead"
+            "strict_turnable": False,
+            "recommended_process": recommended,
+            "alternative_processes": alternatives,
+            "turning_gate_reasons": turning_reasons,
+            "recommendation": f"Use {recommended.replace('_', ' ')} instead of turning."
         }
     
     print(f"  âœ… Part suitable for turning (score: {plan.turning_score}/100)")
@@ -1031,6 +1040,7 @@ def generate_turning_plan(
         "step_protocol": analysis.get("step_protocol", "Unknown"),
         "step_schema": analysis.get("step_schema", "Unknown"),
         "legacy_step": analysis.get("legacy_step", "unknown"),
+        "strict_turnable": True,
         "turning_score": plan.turning_score,
         "material_profile": plan.material_profile,
         "machine_profile": plan.machine_profile,

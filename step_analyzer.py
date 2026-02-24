@@ -350,6 +350,8 @@ def analyze_machinability(shape, ocp_modules):
                 'turning': {
                     'feasibility': 'Medium',
                     'score': 45,
+                    'strict_turnable': False,
+                    'strict_checks': {},
                     'reasons': [
                         'Moderate percentage of cylindrical surfaces',
                         'Predominance of circular edges',
@@ -472,63 +474,79 @@ def analyze_machinability(shape, ocp_modules):
         "reasons": milling_reasons
     }
     
-    # Turning (Lathe) - IMPROVED scoring for rotational parts like bottles
+    # Turning (Lathe) - strict scoring and gating for true turnable geometry
     turning_score = 0
     turning_reasons = []
     
-    # Turning requires rotational symmetry - check for cylindrical dominance
-    cylindrical_ratio = surface_types["Cylinder"] / sum(surface_types.values()) if sum(surface_types.values()) > 0 else 0
-    if cylindrical_ratio > 0.5:
-        turning_score += 50
-        turning_reasons.append("High percentage of cylindrical surfaces suggests rotational symmetry")
-    elif cylindrical_ratio > 0.2:  # LOWERED threshold from 0.3 to 0.2 (bottles ~30-40%)
-        turning_score += 30  # INCREASED from 25
-        turning_reasons.append("Moderate percentage of cylindrical surfaces (suitable for turning)")
-    elif surface_types["Cylinder"] > 3:  # NEW: Check absolute count for small parts
-        turning_score += 25
-        turning_reasons.append(f"{surface_types['Cylinder']} cylindrical surfaces detected - rotational part")
-    
-    # Circular edges are STRONG indicators for turning (bottles have many)
-    if edge_types["Circle"] > 0:
-        # IMPROVED: Give credit for circular edges, not just dominance
-        edge_credit = min(35, edge_types["Circle"] * 3)
-        turning_score += edge_credit
-        turning_reasons.append(f"{edge_types['Circle']} circular edges detected (typical of rotational/bottle parts)")
-    
-    # Complex surfaces are difficult for turning - but less penalty for small details
-    # (bottles have ribs, threads - still turnable)
-    if complex_surfaces > 0:
-        penalty = min(20, complex_surfaces * 1.5)  # REDUCED from complex*3 to *1.5
-        turning_score -= penalty
-        if complex_surfaces <= 3:
-            turning_reasons.append(f"{complex_surfaces} minor complex surfaces (fine details turnable)")
-        else:
-            turning_reasons.append(f"{complex_surfaces} complex surfaces (moderate turning difficulty)")
-    
-    # Aspect ratio check - more lenient for rotational parts
-    # Bottles aren't always long vs diameter, check if reasonable proportions
-    length = dimensions["z_size"]
-    max_diameter = max(dimensions["x_size"], dimensions["y_size"])
-    
-    if length > 0 and max_diameter > 0:
-        aspect_ratio = length / max_diameter
-        if aspect_ratio > 0.5:  # RELAXED: was > 2.0, now accepts wider range
-            turning_score += 20
-            turning_reasons.append(f"Length to diameter ratio {aspect_ratio:.1f}:1 suitable for turning")
-    
-    # NEW: Add points for rotational geometry indicators
-    # Parts with few planes are likely rotational (bottles, shafts, etc.)
-    plane_count = surface_types.get("Plane", 0)
-    if plane_count <= 3:  # Few planes = rotational part
-        turning_score += 15
-        turning_reasons.append("Rotational geometry detected (excellent turning candidate)")
-    
-    # INCREASED base score from 20 to 35 (recognition that turning is viable for many parts)
-    turning_score = max(0, min(100, turning_score + 35))
+    total_surfaces = max(sum(surface_types.values()), 1)
+    total_edges = max(sum(edge_types.values()), 1)
+    cylindrical_ratio = surface_types["Cylinder"] / total_surfaces
+    circular_edge_ratio = edge_types["Circle"] / total_edges
+    complex_surfaces = surface_types["BezierSurface"] + surface_types["BSplineSurface"] + surface_types["Other"]
+
+    x_size = max(dimensions["x_size"], 0.001)
+    y_size = max(dimensions["y_size"], 0.001)
+    z_size = max(dimensions["z_size"], 0.001)
+    radial_size = max(x_size, y_size)
+    xy_delta_ratio = abs(x_size - y_size) / radial_size
+    aspect_ratio = z_size / radial_size
+
+    strict_checks = {
+        "axisymmetric_xy": xy_delta_ratio <= 0.15,
+        "cylindrical_dominance": cylindrical_ratio >= 0.35 or surface_types["Cylinder"] >= 6,
+        "circular_edge_support": circular_edge_ratio >= 0.25 or edge_types["Circle"] >= 8,
+        "limited_complexity": complex_surfaces <= 6,
+        "reasonable_aspect_ratio": 0.3 <= aspect_ratio <= 8.0,
+    }
+
+    if strict_checks["axisymmetric_xy"]:
+        turning_score += 28
+        turning_reasons.append(f"Near-axisymmetric envelope in X/Y (delta ratio {xy_delta_ratio:.2f}).")
+    else:
+        turning_score -= 20
+        turning_reasons.append(f"X/Y envelope mismatch is high (delta ratio {xy_delta_ratio:.2f}).")
+
+    if strict_checks["cylindrical_dominance"]:
+        turning_score += 28
+        turning_reasons.append(f"Cylindrical surface support is strong ({surface_types['Cylinder']} cylinders, ratio {cylindrical_ratio:.2f}).")
+    else:
+        turning_score -= 15
+        turning_reasons.append(f"Low cylindrical dominance ({surface_types['Cylinder']} cylinders, ratio {cylindrical_ratio:.2f}).")
+
+    if strict_checks["circular_edge_support"]:
+        turning_score += 22
+        turning_reasons.append(f"Circular edge support is strong ({edge_types['Circle']} circular edges, ratio {circular_edge_ratio:.2f}).")
+    else:
+        turning_score -= 10
+        turning_reasons.append("Insufficient circular edges for confident rotational machining.")
+
+    if strict_checks["limited_complexity"]:
+        turning_score += 12
+        turning_reasons.append(f"Complex surface count is manageable ({complex_surfaces}).")
+    else:
+        turning_score -= 20
+        turning_reasons.append(f"Too many complex/freeform surfaces for strict turning ({complex_surfaces}).")
+
+    if strict_checks["reasonable_aspect_ratio"]:
+        turning_score += 10
+        turning_reasons.append(f"Aspect ratio {aspect_ratio:.2f}:1 is reasonable for turning.")
+    else:
+        turning_score -= 12
+        turning_reasons.append(f"Aspect ratio {aspect_ratio:.2f}:1 is outside strict turning range.")
+
+    turning_score = max(0, min(100, turning_score + 20))
+    strict_turnable = all(strict_checks.values()) and turning_score >= 75
+    if strict_turnable:
+        turning_reasons.append("Strict turning gate passed: geometry qualifies for CAPP turning workflow.")
+    else:
+        failing = [k for k, v in strict_checks.items() if not v]
+        turning_reasons.append(f"Strict turning gate failed: {', '.join(failing)}.")
     
     machinability["turning"] = {
         "score": turning_score,
-        "feasibility": "High" if turning_score > 70 else "Medium" if turning_score > 40 else "Low",
+        "feasibility": "High" if strict_turnable else "Medium" if turning_score > 55 else "Low",
+        "strict_turnable": strict_turnable,
+        "strict_checks": strict_checks,
         "reasons": turning_reasons
     }
     
@@ -568,6 +586,8 @@ def analyze_machinability(shape, ocp_modules):
         "3d_printing": machinability["3d_printing"]["score"]
     }
     recommended_process = max(scores, key=scores.get)
+    sorted_processes = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    alternative_processes = [name for name, _ in sorted_processes if name != "turning"][:2]
     
     # Generate machining requirements based on the recommended process
     machining_requirements = []
@@ -603,6 +623,7 @@ def analyze_machinability(shape, ocp_modules):
         "edge_types": edge_types,
         "dimensions": dimensions,
         "recommended_process": recommended_process,
+        "alternative_processes": alternative_processes,
         "machining_requirements": machining_requirements
     }
 
@@ -850,6 +871,8 @@ def analyze_step_file(file_path: str = None):
             'cylindrical_faces': cylinder_count,
             'model_info': model_info,
             'machinability': machinability_info['machinability'],
+            'recommended_process': machinability_info.get('recommended_process'),
+            'alternative_processes': machinability_info.get('alternative_processes', []),
             'step_protocol': model_info.get("header_data", {}).get("step_protocol", "Unknown"),
             'step_schema': model_info.get("header_data", {}).get("step_schema", "Unknown"),
             'legacy_step': model_info.get("header_data", {}).get("legacy_step", "unknown"),

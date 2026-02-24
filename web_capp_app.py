@@ -287,6 +287,19 @@ def main() -> None:
                 st.success(f"Completed: {uploaded.name}")
             else:
                 st.error(result.get("error", "Analysis failed"))
+                recommended = result.get("recommended_process")
+                alternatives = result.get("alternative_processes", [])
+                gate_reasons = result.get("turning_gate_reasons", [])
+                if recommended:
+                    st.warning(f"Recommended machining type: {recommended.replace('_', ' ').upper()}")
+                if alternatives:
+                    pretty = ", ".join(p.replace("_", " ").upper() for p in alternatives)
+                    st.info(f"Other viable process options: {pretty}")
+                if gate_reasons:
+                    with st.expander("Why turning was rejected"):
+                        for reason in gate_reasons:
+                            st.write(f"- {reason}")
+                st.stop()
 
     result = st.session_state.analysis_result
     selected_name = st.session_state.uploaded_name or "N/A"
