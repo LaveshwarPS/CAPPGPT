@@ -23,40 +23,122 @@ from chat_ollama import query_ollama, OllamaError, set_model
 # Configuration from environment variables
 OLLAMA_AI_TIMEOUT = int(os.getenv("OLLAMA_AI_TIMEOUT", "120"))
 
-DEFAULT_MATERIAL_PROFILE = "Aluminum 6061-T6"
-DEFAULT_MACHINE_PROFILE = "2-axis CNC turning center (ST-20 class)"
+TOP_MATERIALS_INDIA = [
+    "EN8 / EN8D",
+    "EN1A (Free-cutting steel)",
+    "EN19 / 42CrMo4",
+    "C45 / CK45",
+    "20MnCr5 / EN353",
+    "SS304",
+    "SS316 / 316L",
+    "SS410",
+    "Aluminum 6061 / 6082",
+    "Brass (CW614N / CuZn39Pb3)",
+]
+
+TOP_MACHINE_PROFILES_INDIA = [
+    "ACE Designers CNC Turning Center",
+    "Jyoti CNC Turning Center",
+    "LMW CNC Turning Center",
+    "BFW CNC Turning Center",
+    "Haas ST Series",
+    "Mazak QUICK TURN Series",
+    "Okuma CNC Lathe",
+    "DMG MORI Turning Center",
+    "DN Solutions Lynx/Puma",
+    "HMT CNC Lathe",
+]
+
+DEFAULT_MATERIAL_PROFILE = "EN8 / EN8D"
+DEFAULT_MACHINE_PROFILE = "ACE Designers CNC Turning Center"
 
 MATERIAL_SPEED_FACTORS = {
-    "Aluminum 6061-T6": 1.7,
-    "Mild Steel (AISI 1018/1020)": 1.0,
-    "Stainless Steel 304": 0.65,
+    "EN8 / EN8D": 1.0,
+    "EN1A (Free-cutting steel)": 1.15,
+    "EN19 / 42CrMo4": 0.8,
+    "C45 / CK45": 0.95,
+    "20MnCr5 / EN353": 0.9,
+    "SS304": 0.65,
+    "SS316 / 316L": 0.6,
+    "SS410": 0.85,
+    "Aluminum 6061 / 6082": 1.7,
+    "Brass (CW614N / CuZn39Pb3)": 1.8,
 }
 
 MACHINE_PROFILES = {
-    "2-axis CNC turning center (ST-20 class)": {
+    "ACE Designers CNC Turning Center": {
         "max_rpm": 4000,
         "max_power_kw": 14.9,
         "max_turning_diameter_mm": 262.0,
         "max_turning_length_mm": 572.0,
     },
-    "Toolroom CNC lathe (TL-1 class)": {
+    "Jyoti CNC Turning Center": {
+        "max_rpm": 4000,
+        "max_power_kw": 14.9,
+        "max_turning_diameter_mm": 260.0,
+        "max_turning_length_mm": 600.0,
+    },
+    "LMW CNC Turning Center": {
+        "max_rpm": 4000,
+        "max_power_kw": 15.0,
+        "max_turning_diameter_mm": 300.0,
+        "max_turning_length_mm": 650.0,
+    },
+    "BFW CNC Turning Center": {
+        "max_rpm": 3500,
+        "max_power_kw": 12.0,
+        "max_turning_diameter_mm": 280.0,
+        "max_turning_length_mm": 600.0,
+    },
+    "Haas ST Series": {
+        "max_rpm": 4000,
+        "max_power_kw": 14.9,
+        "max_turning_diameter_mm": 262.0,
+        "max_turning_length_mm": 572.0,
+    },
+    "Mazak QUICK TURN Series": {
+        "max_rpm": 5000,
+        "max_power_kw": 18.5,
+        "max_turning_diameter_mm": 300.0,
+        "max_turning_length_mm": 600.0,
+    },
+    "Okuma CNC Lathe": {
+        "max_rpm": 4500,
+        "max_power_kw": 18.5,
+        "max_turning_diameter_mm": 300.0,
+        "max_turning_length_mm": 600.0,
+    },
+    "DMG MORI Turning Center": {
+        "max_rpm": 5000,
+        "max_power_kw": 18.5,
+        "max_turning_diameter_mm": 300.0,
+        "max_turning_length_mm": 600.0,
+    },
+    "DN Solutions Lynx/Puma": {
+        "max_rpm": 4500,
+        "max_power_kw": 15.0,
+        "max_turning_diameter_mm": 280.0,
+        "max_turning_length_mm": 600.0,
+    },
+    "HMT CNC Lathe": {
         "max_rpm": 1800,
         "max_power_kw": 11.2,
         "max_turning_diameter_mm": 406.0,
         "max_turning_length_mm": 762.0,
     },
-    "High-speed CNC turning center (ST-10 class)": {
-        "max_rpm": 6000,
-        "max_power_kw": 11.2,
-        "max_turning_diameter_mm": 140.0,
-        "max_turning_length_mm": 355.0,
-    },
 }
 
 SPECIFIC_POWER_KW_PER_CM3_MIN = {
-    "Aluminum 6061-T6": 0.03,
-    "Mild Steel (AISI 1018/1020)": 0.05,
-    "Stainless Steel 304": 0.07,
+    "EN8 / EN8D": 0.05,
+    "EN1A (Free-cutting steel)": 0.045,
+    "EN19 / 42CrMo4": 0.065,
+    "C45 / CK45": 0.055,
+    "20MnCr5 / EN353": 0.06,
+    "SS304": 0.07,
+    "SS316 / 316L": 0.075,
+    "SS410": 0.06,
+    "Aluminum 6061 / 6082": 0.03,
+    "Brass (CW614N / CuZn39Pb3)": 0.03,
 }
 
 
