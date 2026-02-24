@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -53,6 +54,29 @@ def _save_uploaded_step(uploaded_file) -> str:
         return tmp.name
 
 
+def _detect_step_protocol_from_bytes(file_bytes: bytes) -> Dict[str, str]:
+    text = file_bytes[:128 * 1024].decode("latin-1", errors="ignore")
+    match = re.search(r"FILE_SCHEMA\s*\(\s*\((.*?)\)\s*\)\s*;", text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return {"protocol": "Unknown", "schema": "Unknown", "legacy": "unknown"}
+
+    schema_raw = re.sub(r"[\s'\"()]", "", match.group(1))
+    schema_upper = schema_raw.upper()
+    if "AP242" in schema_upper or "MANAGED_MODEL_BASED_3D_ENGINEERING" in schema_upper:
+        protocol = "AP242"
+    elif "AP214" in schema_upper or "AUTOMOTIVE_DESIGN" in schema_upper:
+        protocol = "AP214"
+    elif "AP203" in schema_upper or "CONFIG_CONTROL_DESIGN" in schema_upper:
+        protocol = "AP203"
+    else:
+        protocol = "Unknown"
+
+    legacy = "yes" if protocol in {"AP203", "AP214"} else "no"
+    if protocol == "Unknown":
+        legacy = "unknown"
+    return {"protocol": protocol, "schema": schema_raw or "Unknown", "legacy": legacy}
+
+
 def _summary_text(result: Dict, selected_name: str) -> str:
     operations = result.get("operations", [])
     tools = result.get("tools", [])
@@ -61,6 +85,8 @@ def _summary_text(result: Dict, selected_name: str) -> str:
         "TURNING PROCESS PLAN SUMMARY\n\n"
         f"File: {selected_name}\n"
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"STEP protocol: {result.get('step_protocol', 'Unknown')}\n"
+        f"STEP schema: {result.get('step_schema', 'Unknown')}\n\n"
         f"Material profile: {result.get('material_profile', DEFAULT_MATERIAL_PROFILE)}\n"
         f"Machine profile: {result.get('machine_profile', DEFAULT_MACHINE_PROFILE)}\n\n"
         f"Tolerance target: {result.get('tolerance_mm') if result.get('tolerance_mm') is not None else 'Not specified'} mm\n"
@@ -191,6 +217,23 @@ def main() -> None:
     with st.sidebar:
         st.header("File & Options")
         uploaded = st.file_uploader("Select STEP file", type=["step", "stp"])
+        uploaded_step_info = None
+        continue_with_legacy = True
+        if uploaded is not None:
+            uploaded_step_info = _detect_step_protocol_from_bytes(uploaded.getvalue())
+            st.caption(
+                f"STEP schema: {uploaded_step_info.get('protocol', 'Unknown')} "
+                f"({uploaded_step_info.get('schema', 'Unknown')})"
+            )
+            if uploaded_step_info.get("protocol") in {"AP203", "AP214"}:
+                st.warning(
+                    "This file uses an older STEP schema. If possible, export and upload AP242 for better feature fidelity."
+                )
+                continue_with_legacy = st.checkbox(
+                    "Continue with this older STEP version",
+                    value=False,
+                    key=f"continue_legacy_{uploaded.name}",
+                )
         with_ai = st.checkbox("Include AI Optimization", value=True)
         save_json = st.checkbox("Prepare JSON Export", value=True)
         material_profile = st.selectbox(
@@ -228,6 +271,8 @@ def main() -> None:
     if analyze:
         if not uploaded:
             st.error("Please upload a STEP file first.")
+        elif uploaded_step_info and uploaded_step_info.get("protocol") in {"AP203", "AP214"} and not continue_with_legacy:
+            st.error("Please confirm continue for AP203/AP214, or upload an AP242 STEP file.")
         else:
             st.session_state.uploaded_name = uploaded.name
             temp_path = _save_uploaded_step(uploaded)

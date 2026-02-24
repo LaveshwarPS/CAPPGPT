@@ -12,6 +12,39 @@ Date: September 2025
 import sys
 from pathlib import Path
 import traceback
+import re
+from typing import Dict
+
+
+def detect_step_protocol(file_path: str) -> Dict[str, str]:
+    """Detect STEP schema/protocol from FILE_SCHEMA header."""
+    try:
+        with open(file_path, "rb") as f:
+            raw = f.read(128 * 1024)  # Header should be near file start.
+        text = raw.decode("latin-1", errors="ignore")
+    except Exception:
+        return {"protocol": "Unknown", "schema": "Unknown", "legacy": "unknown"}
+
+    match = re.search(r"FILE_SCHEMA\s*\(\s*\((.*?)\)\s*\)\s*;", text, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return {"protocol": "Unknown", "schema": "Unknown", "legacy": "unknown"}
+
+    schema_raw = re.sub(r"[\s'\"()]", "", match.group(1))
+    schema_upper = schema_raw.upper()
+
+    protocol = "Unknown"
+    if "AP242" in schema_upper or "MANAGED_MODEL_BASED_3D_ENGINEERING" in schema_upper:
+        protocol = "AP242"
+    elif "AP214" in schema_upper or "AUTOMOTIVE_DESIGN" in schema_upper:
+        protocol = "AP214"
+    elif "AP203" in schema_upper or "CONFIG_CONTROL_DESIGN" in schema_upper:
+        protocol = "AP203"
+
+    legacy = "yes" if protocol in {"AP203", "AP214"} else "no"
+    if protocol == "Unknown":
+        legacy = "unknown"
+
+    return {"protocol": protocol, "schema": schema_raw or "Unknown", "legacy": legacy}
 
 
 def safe_input(prompt: str):
@@ -113,6 +146,12 @@ def get_model_description(path: str, ocp_modules) -> dict:
     import os
     import datetime
     
+    step_protocol = (
+        detect_step_protocol(str(path))
+        if path
+        else {"protocol": "Unknown", "schema": "Unknown", "legacy": "unknown"}
+    )
+
     # Handle missing dependencies
     if not ocp_modules:
         print("📊 Using mock data for model description (demo mode)")
@@ -123,7 +162,12 @@ def get_model_description(path: str, ocp_modules) -> dict:
                 "size_kb": round(os.path.getsize(file_path) / 1024, 2) if os.path.exists(file_path) else 250.45,
                 "last_modified": datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             },
-            "header_data": {"root_entities": 5},
+            "header_data": {
+                "root_entities": 5,
+                "step_protocol": step_protocol.get("protocol", "Unknown"),
+                "step_schema": step_protocol.get("schema", "Unknown"),
+                "legacy_step": step_protocol.get("legacy", "unknown"),
+            },
             "geometry_stats": {
                 "faces": 403,
                 "edges": 1878,
@@ -172,6 +216,9 @@ def get_model_description(path: str, ocp_modules) -> dict:
         # Get number of roots
         nb_roots = reader.NbRootsForTransfer()
         header_data["root_entities"] = nb_roots
+        header_data["step_protocol"] = step_protocol.get("protocol", "Unknown")
+        header_data["step_schema"] = step_protocol.get("schema", "Unknown")
+        header_data["legacy_step"] = step_protocol.get("legacy", "unknown")
         
         # Transfer roots
         reader.TransferRoots()
@@ -803,6 +850,9 @@ def analyze_step_file(file_path: str = None):
             'cylindrical_faces': cylinder_count,
             'model_info': model_info,
             'machinability': machinability_info['machinability'],
+            'step_protocol': model_info.get("header_data", {}).get("step_protocol", "Unknown"),
+            'step_schema': model_info.get("header_data", {}).get("step_schema", "Unknown"),
+            'legacy_step': model_info.get("header_data", {}).get("legacy_step", "unknown"),
             'success': True
         }
         

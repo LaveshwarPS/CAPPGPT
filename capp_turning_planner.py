@@ -827,6 +827,8 @@ Suggest optimizations for:
                 "generator": "CAPP Turning Planner",
                 "date": datetime.now().isoformat(),
                 "part_file": self.analysis.get("file_path"),
+                "step_protocol": self.analysis.get("step_protocol", "Unknown"),
+                "step_schema": self.analysis.get("step_schema", "Unknown"),
                 "material_profile": self.material_profile,
                 "machine_profile": self.machine_profile,
                 "tolerance_mm": self.tolerance_mm,
@@ -944,6 +946,9 @@ def generate_turning_plan(
     
     return {
         "success": True,
+        "step_protocol": analysis.get("step_protocol", "Unknown"),
+        "step_schema": analysis.get("step_schema", "Unknown"),
+        "legacy_step": analysis.get("legacy_step", "unknown"),
         "turning_score": plan.turning_score,
         "material_profile": plan.material_profile,
         "machine_profile": plan.machine_profile,
