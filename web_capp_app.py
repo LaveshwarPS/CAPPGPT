@@ -63,6 +63,8 @@ def _summary_text(result: Dict, selected_name: str) -> str:
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
         f"Material profile: {result.get('material_profile', DEFAULT_MATERIAL_PROFILE)}\n"
         f"Machine profile: {result.get('machine_profile', DEFAULT_MACHINE_PROFILE)}\n\n"
+        f"Tolerance target: {result.get('tolerance_mm') if result.get('tolerance_mm') is not None else 'Not specified'} mm\n"
+        f"Surface target: {result.get('surface_roughness_ra') if result.get('surface_roughness_ra') is not None else 'Not specified'} um Ra\n\n"
         f"Turning score: {result.get('turning_score', 'N/A')}/100\n"
         f"Suitable for turning: {'YES' if result.get('success') else 'NO'}\n\n"
         f"Operations: {len(operations)}\n"
@@ -127,6 +129,41 @@ def _tools_table_rows(result: Dict) -> List[Dict]:
     return rows
 
 
+def _render_validation_dialog(result: Dict) -> None:
+    validation = result.get("validation") or {}
+    status = validation.get("status", "pass")
+    messages = validation.get("messages", [])
+    features = validation.get("feature_detection", {})
+    metrics = features.get("metrics", {})
+
+    def _render_content() -> None:
+        if status == "fail":
+            st.error("Validation status: FAIL")
+        elif status == "warn":
+            st.warning("Validation status: WARN")
+        else:
+            st.success("Validation status: PASS")
+
+        for msg in messages:
+            level = msg.get("level", "pass").upper()
+            st.write(f"[{level}] {msg.get('title', '')}: {msg.get('detail', '')}")
+
+        st.caption(
+            "Geometry metrics: "
+            f"edge/face={metrics.get('edge_face_ratio', 'n/a')}, "
+            f"cylinder={metrics.get('cylinder_surfaces', 'n/a')}, "
+            f"cone={metrics.get('cone_surfaces', 'n/a')}, "
+            f"torus={metrics.get('torus_surfaces', 'n/a')}"
+        )
+
+    if hasattr(st, "popover"):
+        with st.popover("Validation"):
+            _render_content()
+    else:
+        with st.expander("Validation"):
+            _render_content()
+
+
 def main() -> None:
     # Keep web app provider fixed to Gemini.
     set_provider("gemini")
@@ -166,6 +203,22 @@ def main() -> None:
             MACHINE_OPTIONS,
             index=MACHINE_OPTIONS.index(DEFAULT_MACHINE_PROFILE),
         )
+        tolerance_mm = st.number_input(
+            "Tolerance (+/- mm)",
+            min_value=0.005,
+            max_value=1.0,
+            value=0.10,
+            step=0.005,
+            format="%.3f",
+        )
+        surface_roughness_ra = st.number_input(
+            "Surface Finish (Ra um)",
+            min_value=0.2,
+            max_value=12.5,
+            value=3.2,
+            step=0.1,
+            format="%.2f",
+        )
         model = GEMINI_MODEL
         st.markdown("AI Model: `Gemini`")
         st.markdown(f"Provider: `{get_provider()}`")
@@ -186,6 +239,8 @@ def main() -> None:
                     save_json=save_json,
                     material_profile=material_profile,
                     machine_profile=machine_profile,
+                    tolerance_mm=tolerance_mm,
+                    surface_roughness_ra=surface_roughness_ra,
                 )
             st.session_state.analysis_result = result
             st.session_state.chat_history = []
@@ -203,6 +258,7 @@ def main() -> None:
 
     with tab_ops:
         if result and result.get("operations"):
+            _render_validation_dialog(result)
             st.dataframe(
                 _operations_table_rows(result),
                 use_container_width=True,

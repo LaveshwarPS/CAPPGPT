@@ -1,4 +1,4 @@
-"""Computer-Aided Process Planner (CAPP) for Turning Operations.
+﻿"""Computer-Aided Process Planner (CAPP) for Turning Operations.
 
 This module generates detailed turning process plans for STEP files that are
 suitable for lathe machining. It checks machinability and creates a complete
@@ -32,10 +32,31 @@ MATERIAL_SPEED_FACTORS = {
     "Stainless Steel 304": 0.65,
 }
 
-MACHINE_RPM_LIMITS = {
-    "2-axis CNC turning center (ST-20 class)": 4000,
-    "Toolroom CNC lathe (TL-1 class)": 1800,
-    "High-speed CNC turning center (ST-10 class)": 6000,
+MACHINE_PROFILES = {
+    "2-axis CNC turning center (ST-20 class)": {
+        "max_rpm": 4000,
+        "max_power_kw": 14.9,
+        "max_turning_diameter_mm": 262.0,
+        "max_turning_length_mm": 572.0,
+    },
+    "Toolroom CNC lathe (TL-1 class)": {
+        "max_rpm": 1800,
+        "max_power_kw": 11.2,
+        "max_turning_diameter_mm": 406.0,
+        "max_turning_length_mm": 762.0,
+    },
+    "High-speed CNC turning center (ST-10 class)": {
+        "max_rpm": 6000,
+        "max_power_kw": 11.2,
+        "max_turning_diameter_mm": 140.0,
+        "max_turning_length_mm": 355.0,
+    },
+}
+
+SPECIFIC_POWER_KW_PER_CM3_MIN = {
+    "Aluminum 6061-T6": 0.03,
+    "Mild Steel (AISI 1018/1020)": 0.05,
+    "Stainless Steel 304": 0.07,
 }
 
 
@@ -48,6 +69,8 @@ class TurningProcessPlan:
         model: str = "phi",
         material_profile: str = DEFAULT_MATERIAL_PROFILE,
         machine_profile: str = DEFAULT_MACHINE_PROFILE,
+        tolerance_mm: Optional[float] = None,
+        surface_roughness_ra: Optional[float] = None,
     ):
         """Initialize the process plan with analysis data.
         
@@ -59,11 +82,15 @@ class TurningProcessPlan:
         self.model = model
         self.material_profile = material_profile
         self.machine_profile = machine_profile
+        self.tolerance_mm = tolerance_mm
+        self.surface_roughness_ra = surface_roughness_ra
         self.turning_score = self._get_turning_score()
         self.is_machinable = self.turning_score >= 40  # Minimum threshold
         self.operations = []
         self.tools = []
         self.ai_recommendations = {}
+        self.feature_detection = {}
+        self.validation = {}
     
     def _get_turning_score(self) -> int:
         """Extract turning machinability score from analysis.
@@ -111,132 +138,214 @@ class TurningProcessPlan:
         """
         model_info = self.analysis.get("model_info", {})
         return model_info.get("surface_types", {})
+
+    def _machine_limits(self) -> Dict[str, float]:
+        return MACHINE_PROFILES.get(
+            self.machine_profile,
+            MACHINE_PROFILES[DEFAULT_MACHINE_PROFILE],
+        )
+
+    def _detect_features(self, dimensions: Dict[str, float]) -> Dict[str, Dict]:
+        surface = self._get_surface_info()
+        geometry_stats = self.analysis.get("model_info", {}).get("geometry_stats", {})
+        faces = max(int(geometry_stats.get("faces", 0)), 1)
+        edges = max(int(geometry_stats.get("edges", 0)), 0)
+        edge_face_ratio = edges / faces
+        cyl = int(surface.get("Cylinder", 0))
+        cone = int(surface.get("Cone", 0))
+        torus = int(surface.get("Torus", 0))
+        plane = int(surface.get("Plane", 0))
+        slenderness = dimensions["length"] / max(dimensions["diameter"], 0.1)
+
+        threading_reasons: List[str] = []
+        threading_score = 0
+        if cone > 0 and cyl >= 2:
+            threading_score += 2
+            threading_reasons.append("Cone + multiple cylinder surfaces indicate thread lead-in profile.")
+        if edge_face_ratio >= 2.8 and cyl >= 3:
+            threading_score += 1
+            threading_reasons.append("High edge density on cylindrical geometry suggests helical detail.")
+        if slenderness >= 1.2:
+            threading_score += 1
+            threading_reasons.append("Length/diameter ratio supports external threading access.")
+
+        grooving_reasons: List[str] = []
+        grooving_score = 0
+        if torus > 0:
+            grooving_score += 2
+            grooving_reasons.append("Torus surfaces are a strong groove/fillet indicator.")
+        if cyl >= 4 and plane >= 4 and edge_face_ratio >= 2.2:
+            grooving_score += 1
+            grooving_reasons.append("Cylinder-plane transitions and edge density suggest relief grooves.")
+        if self.analysis.get("cylindrical_faces", 0) >= 5:
+            grooving_score += 1
+            grooving_reasons.append("High cylindrical face count indicates stepped OD/ID features.")
+
+        def _feature_result(score: int, reasons: List[str], label: str) -> Dict:
+            if score >= 3:
+                return {"detected": True, "confidence": "high", "reasons": reasons[:3], "label": label}
+            if score == 2:
+                return {"detected": True, "confidence": "medium", "reasons": reasons[:3], "label": label}
+            return {
+                "detected": False,
+                "confidence": "low",
+                "reasons": reasons[:2] or [f"No strong geometric evidence for {label}."],
+                "label": label,
+            }
+
+        return {
+            "threading": _feature_result(threading_score, threading_reasons, "threading"),
+            "grooving": _feature_result(grooving_score, grooving_reasons, "grooving"),
+            "metrics": {
+                "edge_face_ratio": round(edge_face_ratio, 2),
+                "cylinder_surfaces": cyl,
+                "cone_surfaces": cone,
+                "torus_surfaces": torus,
+                "slenderness_ratio": round(slenderness, 2),
+            },
+        }
+
+    def _needs_finish_pass(self) -> bool:
+        if self.tolerance_mm is not None and self.tolerance_mm <= 0.05:
+            return True
+        if self.surface_roughness_ra is not None and self.surface_roughness_ra <= 1.6:
+            return True
+        return False
     
     def generate_operations(self) -> List[Dict]:
-        """Generate turning operations sequence.
-        
-        Returns:
-            List of operation dictionaries.
-        """
+        """Generate turning operations sequence."""
         if not self.is_machinable:
             return []
-        
+
         dimensions = self._format_dimensions()
         diameter = dimensions["diameter"]
         length = dimensions["length"]
-        
-        operations = []
-        
-        # Operation 1: Face & Center
-        operations.append({
-            "operation_id": 1,
+        features = self._detect_features(dimensions)
+        self.feature_detection = features
+
+        operations: List[Dict] = []
+
+        def add_operation(op: Dict) -> None:
+            row = dict(op)
+            row["operation_id"] = len(operations) + 1
+            operations.append(row)
+
+        add_operation({
             "name": "Face & Center",
             "description": "Face the part and create center marks for alignment",
             "type": "facing",
             "tool": "Facing insert (CNMG)",
             "spindle_speed": self._calculate_spindle_speed(diameter, "facing"),
-            "feed_rate": 0.15,  # mm/rev
-            "depth_of_cut": 1.0,  # mm
+            "feed_rate": 0.15,
+            "depth_of_cut": 1.0,
             "coolant": "flood",
-            "estimated_time": 2.0  # minutes
+            "estimated_time": 2.0,
         })
-        
-        # Operation 2: Rough turning (if diameter > 20mm)
+
         if diameter > 20:
-            operations.append({
-                "operation_id": 2,
+            add_operation({
                 "name": "Rough Turning",
                 "description": "Remove material from outer diameter",
                 "type": "turning",
                 "tool": "Turning insert (VNMG)",
                 "spindle_speed": self._calculate_spindle_speed(diameter * 0.8, "rough"),
-                "feed_rate": 0.20,  # mm/rev
-                "depth_of_cut": 2.0,  # mm
+                "feed_rate": 0.20,
+                "depth_of_cut": 2.0,
                 "coolant": "flood",
-                "estimated_time": self._estimate_turning_time(diameter, length, 2.0, 0.20)
+                "estimated_time": self._estimate_turning_time(diameter, length, 2.0, 0.20),
             })
-        
-        # Operation 3: Finish turning
-        operations.append({
-            "operation_id": 3,
+
+        finish_desc = "Achieve final diameter and surface finish"
+        if self.tolerance_mm is not None or self.surface_roughness_ra is not None:
+            tol_text = f"tol +/-{self.tolerance_mm:.3f} mm" if self.tolerance_mm is not None else "tol n/a"
+            ra_text = f"Ra {self.surface_roughness_ra:.2f} um" if self.surface_roughness_ra is not None else "Ra n/a"
+            finish_desc = f"Achieve final diameter and surface finish ({tol_text}, {ra_text})"
+
+        add_operation({
             "name": "Finish Turning",
-            "description": "Achieve final diameter and surface finish",
+            "description": finish_desc,
             "type": "turning",
             "tool": "Finishing insert (VNMG, R0.4)",
             "spindle_speed": self._calculate_spindle_speed(diameter, "finish"),
-            "feed_rate": 0.10,  # mm/rev
-            "depth_of_cut": 0.5,  # mm
+            "feed_rate": 0.10,
+            "depth_of_cut": 0.5,
             "coolant": "flood",
-            "estimated_time": self._estimate_turning_time(diameter, length, 0.5, 0.10)
+            "estimated_time": self._estimate_turning_time(diameter, length, 0.5, 0.10),
         })
-        
-        # Operation 4: Boring (if part has holes/internal features)
+
+        if self._needs_finish_pass():
+            add_operation({
+                "name": "Fine Finish Pass",
+                "description": "Low-DOC pass for tight tolerance and low roughness target",
+                "type": "finishing",
+                "tool": "Wiper finishing insert (VNMG, R0.2)",
+                "spindle_speed": self._calculate_spindle_speed(diameter, "finish"),
+                "feed_rate": 0.05,
+                "depth_of_cut": 0.2,
+                "coolant": "flood",
+                "estimated_time": self._estimate_turning_time(diameter, length, 0.2, 0.05),
+            })
+
         cylindrical_faces = self.analysis.get("cylindrical_faces", 0)
         if cylindrical_faces > 2:
-            operations.append({
-                "operation_id": 4,
+            add_operation({
                 "name": "Boring",
                 "description": "Machine internal cylindrical features",
                 "type": "boring",
                 "tool": "Boring bar with insert",
                 "spindle_speed": self._calculate_spindle_speed(diameter * 0.5, "boring"),
-                "feed_rate": 0.12,  # mm/rev
-                "depth_of_cut": 1.0,  # mm
+                "feed_rate": 0.12,
+                "depth_of_cut": 1.0,
                 "coolant": "flood",
-                "estimated_time": 3.0
+                "estimated_time": 3.0,
             })
-        
-        # Operation 5: Threading (if applicable)
-        if length > diameter * 1.5:  # Long part
-            operations.append({
-                "operation_id": 5,
+
+        if features["threading"]["detected"]:
+            add_operation({
                 "name": "Threading",
-                "description": "Cut external threads",
+                "description": "Cut external threads (geometry-detected)",
                 "type": "threading",
-                "tool": "Threading insert (60° diamond)",
+                "tool": "Threading insert (60 degree diamond)",
                 "spindle_speed": self._calculate_spindle_speed(diameter, "threading") // 2,
-                "feed_rate": 0.5,  # mm/rev (pitch)
-                "depth_of_cut": 0.5,  # mm
+                "feed_rate": 0.5,
+                "depth_of_cut": 0.5,
                 "coolant": "light",
                 "estimated_time": 2.5,
-                "thread_spec": "M10 x 1.5 (example)"
+                "thread_spec": "M10 x 1.5 (example)",
             })
-        
-        # Operation 6: Grooving
-        operations.append({
-            "operation_id": 6,
-            "name": "Grooving",
-            "description": "Cut grooves for stress relief",
-            "type": "grooving",
-            "tool": "Grooving insert",
-            "spindle_speed": self._calculate_spindle_speed(diameter * 0.7, "grooving"),
-            "feed_rate": 0.15,  # mm/rev
-            "depth_of_cut": 0.8,  # mm
-            "coolant": "flood",
-            "estimated_time": 1.5
-        })
-        
-        # Operation 7: Parting off
-        operations.append({
-            "operation_id": 7,
+
+        if features["grooving"]["detected"]:
+            add_operation({
+                "name": "Grooving",
+                "description": "Cut grooves for stress relief (geometry-detected)",
+                "type": "grooving",
+                "tool": "Grooving insert",
+                "spindle_speed": self._calculate_spindle_speed(diameter * 0.7, "grooving"),
+                "feed_rate": 0.15,
+                "depth_of_cut": 0.8,
+                "coolant": "flood",
+                "estimated_time": 1.5,
+            })
+
+        add_operation({
             "name": "Parting Off",
             "description": "Separate finished part from stock",
             "type": "parting",
             "tool": "Parting blade",
             "spindle_speed": self._calculate_spindle_speed(diameter * 0.9, "parting"),
-            "feed_rate": 0.08,  # mm/rev
+            "feed_rate": 0.08,
             "depth_of_cut": diameter * 0.5,
             "coolant": "light",
-            "estimated_time": 1.0
+            "estimated_time": 1.0,
         })
-        
+
         self.operations = operations
         return operations
-    
+
     def _calculate_spindle_speed(self, diameter_mm: float, operation_type: str) -> int:
         """Calculate spindle speed based on diameter and operation.
         
-        Uses the formula: RPM = (1000 * SFM) / (π * diameter)
+        Uses the formula: RPM = (1000 * SFM) / (Ï€ * diameter)
         where SFM is Surface Feet per Minute
         
         Args:
@@ -269,11 +378,11 @@ class TurningProcessPlan:
         if diameter_inches <= 0:
             diameter_inches = 0.8  # Default ~20mm
         
-        # RPM = (SFM * 12) / (π * D)
+        # RPM = (SFM * 12) / (Ï€ * D)
         rpm = int((sfm * 12) / (3.14159 * diameter_inches))
         
         # Clamp to selected machine limits.
-        machine_rpm_limit = MACHINE_RPM_LIMITS.get(self.machine_profile, 4000)
+        machine_rpm_limit = int(self._machine_limits().get("max_rpm", 4000))
         rpm = max(100, min(machine_rpm_limit, rpm))
         
         return rpm
@@ -300,7 +409,7 @@ class TurningProcessPlan:
         # Spindle speed in RPM
         spindle_speed = self._calculate_spindle_speed(diameter_mm, "rough")
         
-        # Material removal rate (mm³/min) = spindle_speed * feed * depth
+        # Material removal rate (mmÂ³/min) = spindle_speed * feed * depth
         material_removal_rate = spindle_speed * feed_mm_rev * depth_mm
         
         # Volume to remove per pass = length * feed * depth (approximation)
@@ -318,6 +427,141 @@ class TurningProcessPlan:
             total_time = 10.0  # Cap at 10 minutes for small parts
         
         return round(total_time, 1)
+
+    def run_validation_checks(self) -> Dict:
+        """Validate geometry rules, finish logic, and machine limits."""
+        dimensions = self._format_dimensions()
+        limits = self._machine_limits()
+        messages: List[Dict] = []
+
+        threading_detected = bool(self.feature_detection.get("threading", {}).get("detected"))
+        grooving_detected = bool(self.feature_detection.get("grooving", {}).get("detected"))
+        has_threading_op = any(op.get("type") == "threading" for op in self.operations)
+        has_grooving_op = any(op.get("type") == "grooving" for op in self.operations)
+        has_fine_finish = any(op.get("type") == "finishing" for op in self.operations)
+
+        if has_threading_op == threading_detected:
+            messages.append({
+                "level": "pass",
+                "title": "Threading Rule",
+                "detail": f"Threading op {'added' if has_threading_op else 'skipped'} based on geometry detection.",
+            })
+        else:
+            messages.append({
+                "level": "fail",
+                "title": "Threading Rule",
+                "detail": "Threading operation mismatch against geometry detector.",
+            })
+
+        if has_grooving_op == grooving_detected:
+            messages.append({
+                "level": "pass",
+                "title": "Grooving Rule",
+                "detail": f"Grooving op {'added' if has_grooving_op else 'skipped'} based on geometry detection.",
+            })
+        else:
+            messages.append({
+                "level": "fail",
+                "title": "Grooving Rule",
+                "detail": "Grooving operation mismatch against geometry detector.",
+            })
+
+        finish_needed = self._needs_finish_pass()
+        if finish_needed == has_fine_finish:
+            messages.append({
+                "level": "pass",
+                "title": "Tolerance/Ra Rule",
+                "detail": f"Fine finish pass {'enabled' if has_fine_finish else 'not required'} for given quality target.",
+            })
+        else:
+            messages.append({
+                "level": "fail",
+                "title": "Tolerance/Ra Rule",
+                "detail": "Finish pass logic did not match tolerance/Ra thresholds.",
+            })
+
+        if dimensions["diameter"] > limits["max_turning_diameter_mm"]:
+            messages.append({
+                "level": "fail",
+                "title": "Machine Diameter Limit",
+                "detail": f"Part diameter {dimensions['diameter']:.1f} mm exceeds machine limit {limits['max_turning_diameter_mm']:.1f} mm.",
+            })
+        else:
+            messages.append({
+                "level": "pass",
+                "title": "Machine Diameter Limit",
+                "detail": f"Part diameter {dimensions['diameter']:.1f} mm is within machine limit.",
+            })
+
+        if dimensions["length"] > limits["max_turning_length_mm"]:
+            messages.append({
+                "level": "fail",
+                "title": "Machine Length Limit",
+                "detail": f"Part length {dimensions['length']:.1f} mm exceeds machine limit {limits['max_turning_length_mm']:.1f} mm.",
+            })
+        else:
+            messages.append({
+                "level": "pass",
+                "title": "Machine Length Limit",
+                "detail": f"Part length {dimensions['length']:.1f} mm is within machine limit.",
+            })
+
+        max_rpm_limit = int(limits.get("max_rpm", 4000))
+        near_limit = [op for op in self.operations if int(op.get("spindle_speed", 0)) >= int(max_rpm_limit * 0.95)]
+        if near_limit:
+            messages.append({
+                "level": "warn",
+                "title": "Spindle Speed Margin",
+                "detail": f"{len(near_limit)} operation(s) run near machine max RPM ({max_rpm_limit}).",
+            })
+        else:
+            messages.append({
+                "level": "pass",
+                "title": "Spindle Speed Margin",
+                "detail": "All operations are below 95% of machine max RPM.",
+            })
+
+        roughing_ops = [op for op in self.operations if op.get("name") == "Rough Turning"]
+        estimated_kw = 0.0
+        if roughing_ops:
+            op = roughing_ops[0]
+            d = max(dimensions["diameter"], 1.0)
+            rpm = float(op.get("spindle_speed", 0))
+            f = float(op.get("feed_rate", 0))
+            ap = float(op.get("depth_of_cut", 0))
+            mrr_mm3_min = 3.14159 * d * rpm * f * ap
+            mrr_cm3_min = mrr_mm3_min / 1000.0
+            spec_power = SPECIFIC_POWER_KW_PER_CM3_MIN.get(self.material_profile, 0.05)
+            estimated_kw = mrr_cm3_min * spec_power
+
+        usable_power_kw = float(limits.get("max_power_kw", 10.0)) * 0.85
+        if estimated_kw > usable_power_kw:
+            messages.append({
+                "level": "warn",
+                "title": "Spindle Power Check",
+                "detail": f"Estimated roughing demand {estimated_kw:.1f} kW exceeds 85% usable power ({usable_power_kw:.1f} kW).",
+            })
+        else:
+            messages.append({
+                "level": "pass",
+                "title": "Spindle Power Check",
+                "detail": f"Estimated roughing demand {estimated_kw:.1f} kW is within usable power ({usable_power_kw:.1f} kW).",
+            })
+
+        severity = {"pass": 0, "warn": 1, "fail": 2}
+        worst = max(messages, key=lambda m: severity[m["level"]])["level"] if messages else "pass"
+        self.validation = {
+            "status": worst,
+            "messages": messages,
+            "feature_detection": self.feature_detection,
+            "inputs": {
+                "material_profile": self.material_profile,
+                "machine_profile": self.machine_profile,
+                "tolerance_mm": self.tolerance_mm,
+                "surface_roughness_ra": self.surface_roughness_ra,
+            },
+        }
+        return self.validation
     
     def generate_tool_list(self) -> List[Dict]:
         """Generate list of required turning tools.
@@ -375,9 +619,34 @@ class TurningProcessPlan:
                 "description": "For parting off finished parts"
             }
         ]
-        
-        self.tools = tools
-        return tools
+
+        op_types = {op.get("type") for op in self.operations}
+        filtered: List[Dict] = []
+        for tool in tools:
+            name = tool["name"]
+            if name == "Threading Insert" and "threading" not in op_types:
+                continue
+            if name == "Grooving Insert" and "grooving" not in op_types:
+                continue
+            filtered.append(tool)
+
+        if "finishing" in op_types:
+            filtered.append(
+                {
+                    "tool_id": len(filtered) + 1,
+                    "name": "Fine Finishing Insert",
+                    "type": "VNMG 331 Wiper",
+                    "material": "Carbide",
+                    "coating": "TiAlN",
+                    "description": "For tight tolerance and Ra finishing pass",
+                }
+            )
+
+        for idx, tool in enumerate(filtered, start=1):
+            tool["tool_id"] = idx
+
+        self.tools = filtered
+        return filtered
     
     def generate_ai_recommendations(self, timeout: Optional[int] = None) -> Dict:
         """Generate AI-powered optimization recommendations.
@@ -403,7 +672,7 @@ class TurningProcessPlan:
         
         recommendations = {}
         
-        print(f"  ⏳ Generating process optimization recommendations (timeout: {timeout}s)...")
+        print(f"  â³ Generating process optimization recommendations (timeout: {timeout}s)...")
         try:
             prompt = f"""Review this turning process plan for a lathe operation:
 
@@ -414,6 +683,8 @@ Part Specifications:
   - Machinability score: {self.turning_score}/100
   - Workpiece material: {self.material_profile}
   - Lathe machine profile: {self.machine_profile}
+  - Dimensional tolerance target (mm): {self.tolerance_mm if self.tolerance_mm is not None else 'not specified'}
+  - Surface roughness target Ra (um): {self.surface_roughness_ra if self.surface_roughness_ra is not None else 'not specified'}
 
 Planned Operations:
 {operations_summary}
@@ -434,7 +705,7 @@ Suggest optimizations for:
         except OllamaError as e:
             recommendations["optimizations"] = f"Error: {e}"
         
-        print("  ✅ AI recommendations generated")
+        print("  âœ… AI recommendations generated")
         self.ai_recommendations = recommendations
         return recommendations
     
@@ -445,9 +716,9 @@ Suggest optimizations for:
             Formatted report string.
         """
         report = []
-        report.append("═" * 80)
+        report.append("â•" * 80)
         report.append("TURNING PROCESS PLAN (CAPP SYSTEM)")
-        report.append("═" * 80)
+        report.append("â•" * 80)
         report.append("")
         
         # Header
@@ -456,16 +727,20 @@ Suggest optimizations for:
         report.append(f"  Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         report.append(f"  Material Profile: {self.material_profile}")
         report.append(f"  Machine Profile: {self.machine_profile}")
+        if self.tolerance_mm is not None:
+            report.append(f"  Tolerance Target: +/-{self.tolerance_mm:.3f} mm")
+        if self.surface_roughness_ra is not None:
+            report.append(f"  Surface Target: Ra {self.surface_roughness_ra:.2f} um")
         report.append("")
         
         # Machinability
         report.append("TURNING MACHINABILITY:")
         report.append(f"  Score: {self.turning_score}/100")
-        report.append(f"  Suitable for Turning: {'YES ✓' if self.is_machinable else 'NO ✗'}")
+        report.append(f"  Suitable for Turning: {'YES âœ“' if self.is_machinable else 'NO âœ—'}")
         report.append("")
         
         if not self.is_machinable:
-            report.append("❌ This part is NOT suitable for turning operations.")
+            report.append("âŒ This part is NOT suitable for turning operations.")
             report.append("   Consider alternative manufacturing methods.")
             return "\n".join(report)
         
@@ -474,12 +749,12 @@ Suggest optimizations for:
         report.append("PART DIMENSIONS:")
         report.append(f"  Diameter: {dimensions['diameter']:.2f} mm")
         report.append(f"  Length: {dimensions['length']:.2f} mm")
-        report.append(f"  Volume: {dimensions['volume']:.2f} mm³")
+        report.append(f"  Volume: {dimensions['volume']:.2f} mmÂ³")
         report.append("")
         
         # Operations
         report.append("TURNING OPERATIONS SEQUENCE:")
-        report.append("─" * 80)
+        report.append("â”€" * 80)
         
         total_time = 0
         for op in self.operations:
@@ -495,31 +770,31 @@ Suggest optimizations for:
             total_time += op['estimated_time']
         
         report.append("")
-        report.append("─" * 80)
+        report.append("â”€" * 80)
         report.append(f"TOTAL ESTIMATED MACHINING TIME: {total_time:.1f} minutes ({total_time/60:.1f} hours)")
         report.append("")
         
         # Tools
         report.append("REQUIRED TURNING TOOLS:")
-        report.append("─" * 80)
+        report.append("â”€" * 80)
         for tool in self.tools:
             report.append(f"\n{tool['tool_id']}. {tool['name']} ({tool['type']})")
             report.append(f"   Material: {tool['material']} with {tool['coating']} coating")
             report.append(f"   Purpose: {tool['description']}")
         
         report.append("")
-        report.append("─" * 80)
+        report.append("â”€" * 80)
         
         # AI Recommendations
         if self.ai_recommendations.get("optimizations"):
-            report.append("\n🤖 AI OPTIMIZATION RECOMMENDATIONS:")
-            report.append("─" * 80)
+            report.append("\nðŸ¤– AI OPTIMIZATION RECOMMENDATIONS:")
+            report.append("â”€" * 80)
             report.append(self.ai_recommendations.get("optimizations", "No recommendations"))
             report.append("")
         
         # Setup notes
         report.append("SETUP NOTES:")
-        report.append("─" * 80)
+        report.append("â”€" * 80)
         report.append("  1. Mount part securely in chuck or collet")
         report.append("  2. Run spindle at low speed before full engagement")
         report.append("  3. Use appropriate coolant for cutting conditions")
@@ -528,9 +803,9 @@ Suggest optimizations for:
         report.append("  6. Ensure adequate clearance for each tool and holder")
         report.append("")
         
-        report.append("═" * 80)
+        report.append("â•" * 80)
         report.append("End of Process Plan")
-        report.append("═" * 80)
+        report.append("â•" * 80)
         
         return "\n".join(report)
     
@@ -554,6 +829,8 @@ Suggest optimizations for:
                 "part_file": self.analysis.get("file_path"),
                 "material_profile": self.material_profile,
                 "machine_profile": self.machine_profile,
+                "tolerance_mm": self.tolerance_mm,
+                "surface_roughness_ra": self.surface_roughness_ra,
             },
             "machinability": {
                 "score": self.turning_score,
@@ -563,6 +840,8 @@ Suggest optimizations for:
             "operations": self.operations,
             "tools": self.tools,
             "ai_recommendations": self.ai_recommendations,
+            "feature_detection": self.feature_detection,
+            "validation": self.validation,
         }
         
         with open(filepath, "w") as f:
@@ -578,6 +857,8 @@ def generate_turning_plan(
     save_json: bool = False,
     material_profile: str = DEFAULT_MATERIAL_PROFILE,
     machine_profile: str = DEFAULT_MACHINE_PROFILE,
+    tolerance_mm: Optional[float] = None,
+    surface_roughness_ra: Optional[float] = None,
 ) -> dict:
     """Generate a complete turning process plan for a STEP file.
     
@@ -588,35 +869,39 @@ def generate_turning_plan(
         save_json: If True, save plan to JSON file.
         material_profile: Workpiece material profile used for speed logic.
         machine_profile: Lathe machine profile used for RPM limits.
+        tolerance_mm: Optional dimensional tolerance target in mm.
+        surface_roughness_ra: Optional Ra target in um.
     
     Returns:
         Dictionary with plan results.
     """
-    print(f"📊 Analyzing STEP file for turning feasibility: {step_file}")
+    print(f"ðŸ“Š Analyzing STEP file for turning feasibility: {step_file}")
     
     # Analyze the STEP file
-    print("  ⏳ Running geometry analysis...")
+    print("  â³ Running geometry analysis...")
     analysis = analyze_step_file(step_file)
     
     if not analysis.get("success"):
-        print(f"  ❌ Analysis failed: {analysis.get('error')}")
+        print(f"  âŒ Analysis failed: {analysis.get('error')}")
         return {"success": False, "error": analysis.get("error")}
     
-    print("  ✅ Analysis complete")
+    print("  âœ… Analysis complete")
     
     # Create process plan
-    print("\n🔧 Generating turning process plan...")
+    print("\nðŸ”§ Generating turning process plan...")
     plan = TurningProcessPlan(
         analysis,
         model=model,
         material_profile=material_profile,
         machine_profile=machine_profile,
+        tolerance_mm=tolerance_mm,
+        surface_roughness_ra=surface_roughness_ra,
     )
     
     # Check if machinable for turning
     if not plan.is_machinable:
-        print(f"  ❌ Part NOT suitable for turning (score: {plan.turning_score}/100)")
-        print("  ⚠️  This part is better suited for other manufacturing methods")
+        print(f"  âŒ Part NOT suitable for turning (score: {plan.turning_score}/100)")
+        print("  âš ï¸  This part is better suited for other manufacturing methods")
         return {
             "success": False,
             "error": "Part not suitable for turning",
@@ -624,30 +909,35 @@ def generate_turning_plan(
             "recommendation": "Consider 3-axis milling or 3D printing instead"
         }
     
-    print(f"  ✅ Part suitable for turning (score: {plan.turning_score}/100)")
+    print(f"  âœ… Part suitable for turning (score: {plan.turning_score}/100)")
     
     # Generate operations
-    print("  ⏳ Generating turning operations...")
+    print("  â³ Generating turning operations...")
     plan.generate_operations()
-    print(f"  ✅ Generated {len(plan.operations)} operations")
+    print(f"  âœ… Generated {len(plan.operations)} operations")
     
     # Generate tool list
-    print("  ⏳ Generating required tools...")
+    print("  â³ Generating required tools...")
     plan.generate_tool_list()
-    print(f"  ✅ Listed {len(plan.tools)} turning tools")
+    print(f"  âœ… Listed {len(plan.tools)} turning tools")
+
+    # Run validation checks
+    print("  â³ Running rule and machine capability validation...")
+    plan.run_validation_checks()
+    print(f"  âœ… Validation status: {plan.validation.get('status', 'unknown')}")
     
     # Generate AI recommendations if requested
     if with_ai:
-        print("  ⏳ Generating AI optimization recommendations...")
+        print("  â³ Generating AI optimization recommendations...")
         set_model(model)
         plan.generate_ai_recommendations()
     
     # Save JSON if requested
     json_file = None
     if save_json:
-        print("  ⏳ Saving plan to JSON...")
+        print("  â³ Saving plan to JSON...")
         json_file = plan.save_as_json()
-        print(f"  ✅ Saved to: {json_file}")
+        print(f"  âœ… Saved to: {json_file}")
     
     # Generate report
     report = plan.generate_report()
@@ -657,11 +947,15 @@ def generate_turning_plan(
         "turning_score": plan.turning_score,
         "material_profile": plan.material_profile,
         "machine_profile": plan.machine_profile,
+        "tolerance_mm": plan.tolerance_mm,
+        "surface_roughness_ra": plan.surface_roughness_ra,
         "operations": plan.operations,
         "tools": plan.tools,
         "report": report,
         "json_file": json_file,
         "ai_recommendations": plan.ai_recommendations,
+        "feature_detection": plan.feature_detection,
+        "validation": plan.validation,
     }
 
 
@@ -682,7 +976,8 @@ if __name__ == "__main__":
     if result.get("success"):
         print("\n" + result.get("report"))
     else:
-        print(f"\n❌ {result.get('error')}")
+        print(f"\nâŒ {result.get('error')}")
         print(f"   Turning score: {result.get('turning_score')}/100")
         print(f"   {result.get('recommendation')}")
         sys.exit(1)
+
