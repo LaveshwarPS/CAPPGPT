@@ -15,12 +15,26 @@ from typing import Dict, List, Optional
 
 import streamlit as st
 
-from capp_turning_planner import generate_turning_plan
+from capp_turning_planner import (
+    generate_turning_plan,
+    DEFAULT_MATERIAL_PROFILE,
+    DEFAULT_MACHINE_PROFILE,
+)
 from chat_ollama import query_ollama, OllamaError, get_provider, set_provider
 
 
 OLLAMA_AI_TIMEOUT = int(os.getenv("OLLAMA_AI_TIMEOUT", "120"))
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MATERIAL_OPTIONS = [
+    "Aluminum 6061-T6",
+    "Mild Steel (AISI 1018/1020)",
+    "Stainless Steel 304",
+]
+MACHINE_OPTIONS = [
+    "2-axis CNC turning center (ST-20 class)",
+    "Toolroom CNC lathe (TL-1 class)",
+    "High-speed CNC turning center (ST-10 class)",
+]
 
 
 def _init_state() -> None:
@@ -47,6 +61,8 @@ def _summary_text(result: Dict, selected_name: str) -> str:
         "TURNING PROCESS PLAN SUMMARY\n\n"
         f"File: {selected_name}\n"
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"Material profile: {result.get('material_profile', DEFAULT_MATERIAL_PROFILE)}\n"
+        f"Machine profile: {result.get('machine_profile', DEFAULT_MACHINE_PROFILE)}\n\n"
         f"Turning score: {result.get('turning_score', 'N/A')}/100\n"
         f"Suitable for turning: {'YES' if result.get('success') else 'NO'}\n\n"
         f"Operations: {len(operations)}\n"
@@ -93,6 +109,16 @@ def main() -> None:
         uploaded = st.file_uploader("Select STEP file", type=["step", "stp"])
         with_ai = st.checkbox("Include AI Optimization", value=True)
         save_json = st.checkbox("Prepare JSON Export", value=True)
+        material_profile = st.selectbox(
+            "Workpiece Material",
+            MATERIAL_OPTIONS,
+            index=MATERIAL_OPTIONS.index(DEFAULT_MATERIAL_PROFILE),
+        )
+        machine_profile = st.selectbox(
+            "Lathe Machine",
+            MACHINE_OPTIONS,
+            index=MACHINE_OPTIONS.index(DEFAULT_MACHINE_PROFILE),
+        )
         model = GEMINI_MODEL
         st.markdown("AI Model: `Gemini`")
         st.markdown(f"Provider: `{get_provider()}`")
@@ -111,6 +137,8 @@ def main() -> None:
                     model=model,
                     with_ai=with_ai,
                     save_json=save_json,
+                    material_profile=material_profile,
+                    machine_profile=machine_profile,
                 )
             st.session_state.analysis_result = result
             st.session_state.chat_history = []

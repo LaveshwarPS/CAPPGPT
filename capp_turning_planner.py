@@ -23,19 +23,42 @@ from chat_ollama import query_ollama, OllamaError, set_model
 # Configuration from environment variables
 OLLAMA_AI_TIMEOUT = int(os.getenv("OLLAMA_AI_TIMEOUT", "120"))
 
+DEFAULT_MATERIAL_PROFILE = "Aluminum 6061-T6"
+DEFAULT_MACHINE_PROFILE = "2-axis CNC turning center (ST-20 class)"
+
+MATERIAL_SPEED_FACTORS = {
+    "Aluminum 6061-T6": 1.7,
+    "Mild Steel (AISI 1018/1020)": 1.0,
+    "Stainless Steel 304": 0.65,
+}
+
+MACHINE_RPM_LIMITS = {
+    "2-axis CNC turning center (ST-20 class)": 4000,
+    "Toolroom CNC lathe (TL-1 class)": 1800,
+    "High-speed CNC turning center (ST-10 class)": 6000,
+}
+
 
 class TurningProcessPlan:
     """Represents a turning process plan for a STEP file."""
     
-    def __init__(self, analysis: dict, model: str = "phi"):
+    def __init__(
+        self,
+        analysis: dict,
+        model: str = "phi",
+        material_profile: str = DEFAULT_MATERIAL_PROFILE,
+        machine_profile: str = DEFAULT_MACHINE_PROFILE,
+    ):
         """Initialize the process plan with analysis data.
         
         Args:
             analysis: The analysis dict from analyze_step_file.
-            model: Ollama model to use for AI recommendations.
+            model: LLM model to use for AI recommendations.
         """
         self.analysis = analysis
         self.model = model
+        self.material_profile = material_profile
+        self.machine_profile = machine_profile
         self.turning_score = self._get_turning_score()
         self.is_machinable = self.turning_score >= 40  # Minimum threshold
         self.operations = []
@@ -238,7 +261,8 @@ class TurningProcessPlan:
             "parting": 120,
         }
         
-        sfm = surface_speeds.get(operation_type, 200)
+        material_factor = MATERIAL_SPEED_FACTORS.get(self.material_profile, 1.0)
+        sfm = surface_speeds.get(operation_type, 200) * material_factor
         diameter_inches = diameter_mm / 25.4
         
         # Prevent division by zero
@@ -248,8 +272,9 @@ class TurningProcessPlan:
         # RPM = (SFM * 12) / (π * D)
         rpm = int((sfm * 12) / (3.14159 * diameter_inches))
         
-        # Clamp to realistic lathe speeds
-        rpm = max(100, min(5000, rpm))
+        # Clamp to selected machine limits.
+        machine_rpm_limit = MACHINE_RPM_LIMITS.get(self.machine_profile, 4000)
+        rpm = max(100, min(machine_rpm_limit, rpm))
         
         return rpm
     
@@ -387,6 +412,8 @@ Part Specifications:
   - Length: {dimensions['length']:.1f} mm
   - Cylindrical faces: {self.analysis.get('cylindrical_faces', 0)}
   - Machinability score: {self.turning_score}/100
+  - Workpiece material: {self.material_profile}
+  - Lathe machine profile: {self.machine_profile}
 
 Planned Operations:
 {operations_summary}
@@ -427,6 +454,8 @@ Suggest optimizations for:
         report.append("PART INFORMATION:")
         report.append(f"  File: {self.analysis.get('file_path', 'Unknown')}")
         report.append(f"  Analysis Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        report.append(f"  Material Profile: {self.material_profile}")
+        report.append(f"  Machine Profile: {self.machine_profile}")
         report.append("")
         
         # Machinability
@@ -523,6 +552,8 @@ Suggest optimizations for:
                 "generator": "CAPP Turning Planner",
                 "date": datetime.now().isoformat(),
                 "part_file": self.analysis.get("file_path"),
+                "material_profile": self.material_profile,
+                "machine_profile": self.machine_profile,
             },
             "machinability": {
                 "score": self.turning_score,
@@ -540,8 +571,14 @@ Suggest optimizations for:
         return filepath
 
 
-def generate_turning_plan(step_file: str, model: str = "phi", 
-                         with_ai: bool = True, save_json: bool = False) -> dict:
+def generate_turning_plan(
+    step_file: str,
+    model: str = "phi",
+    with_ai: bool = True,
+    save_json: bool = False,
+    material_profile: str = DEFAULT_MATERIAL_PROFILE,
+    machine_profile: str = DEFAULT_MACHINE_PROFILE,
+) -> dict:
     """Generate a complete turning process plan for a STEP file.
     
     Args:
@@ -549,6 +586,8 @@ def generate_turning_plan(step_file: str, model: str = "phi",
         model: Ollama model to use.
         with_ai: If True, generate AI recommendations.
         save_json: If True, save plan to JSON file.
+        material_profile: Workpiece material profile used for speed logic.
+        machine_profile: Lathe machine profile used for RPM limits.
     
     Returns:
         Dictionary with plan results.
@@ -567,7 +606,12 @@ def generate_turning_plan(step_file: str, model: str = "phi",
     
     # Create process plan
     print("\n🔧 Generating turning process plan...")
-    plan = TurningProcessPlan(analysis, model=model)
+    plan = TurningProcessPlan(
+        analysis,
+        model=model,
+        material_profile=material_profile,
+        machine_profile=machine_profile,
+    )
     
     # Check if machinable for turning
     if not plan.is_machinable:
@@ -611,6 +655,8 @@ def generate_turning_plan(step_file: str, model: str = "phi",
     return {
         "success": True,
         "turning_score": plan.turning_score,
+        "material_profile": plan.material_profile,
+        "machine_profile": plan.machine_profile,
         "operations": plan.operations,
         "tools": plan.tools,
         "report": report,
