@@ -169,7 +169,14 @@ class TurningProcessPlan:
         turning_data = self.analysis.get("machinability", {}).get("turning", {})
         self.turning_score = self._get_turning_score()
         self.strict_turnable = bool(turning_data.get("strict_turnable", self.turning_score >= 75))
-        self.is_machinable = self.strict_turnable
+        strict_checks = turning_data.get("strict_checks", {}) or {}
+        self.partial_turnable = bool(
+            self.turning_score >= 55
+            and strict_checks.get("cylindrical_dominance", False)
+            and strict_checks.get("circular_edge_support", False)
+            and strict_checks.get("reasonable_aspect_ratio", False)
+        )
+        self.is_machinable = self.strict_turnable or self.partial_turnable
         self.operations = []
         self.tools = []
         self.ai_recommendations = {}
@@ -984,6 +991,18 @@ def generate_turning_plan(
         surface_roughness_ra=surface_roughness_ra,
     )
     
+    turning_data = analysis.get("machinability", {}).get("turning", {})
+    strict_checks = turning_data.get("strict_checks", {}) or {}
+    failing_checks = [k for k, passed in strict_checks.items() if not passed]
+    check_reason_map = {
+        "axisymmetric_xy": "Part envelope is not axisymmetric enough for full turning-only processing.",
+        "cylindrical_dominance": "Cylindrical content is too low for a robust turning workflow.",
+        "circular_edge_support": "Circular edge evidence is weak for rotational manufacturing.",
+        "limited_complexity": "Freeform/complex surfaces indicate non-turning features (milling/grinding likely needed).",
+        "reasonable_aspect_ratio": "Part proportions are outside safe turning-focused envelope.",
+    }
+    limitation_reasons = [check_reason_map.get(k, k) for k in failing_checks]
+
     # Check if machinable for turning
     if not plan.is_machinable:
         recommended = analysis.get("recommended_process") or "3_axis_milling"
@@ -997,13 +1016,19 @@ def generate_turning_plan(
             "error": "Part is not strictly turnable for CAPP turning workflow.",
             "turning_score": plan.turning_score,
             "strict_turnable": False,
+            "partial_turnable": False,
+            "turning_scope": "none",
             "recommended_process": recommended,
             "alternative_processes": alternatives,
             "turning_gate_reasons": turning_reasons,
+            "turning_limitations": limitation_reasons,
             "recommendation": f"Use {recommended_text} instead of turning."
         }
-    
-    print(f"  âœ… Part suitable for turning (score: {plan.turning_score}/100)")
+
+    if plan.strict_turnable:
+        print(f"  âœ… Part suitable for full turning CAPP (score: {plan.turning_score}/100)")
+    else:
+        print(f"  âš ï¸ Part is partially turnable; generating limited turning CAPP (score: {plan.turning_score}/100)")
     
     # Generate operations
     print("  â³ Generating turning operations...")
@@ -1041,8 +1066,14 @@ def generate_turning_plan(
         "step_protocol": analysis.get("step_protocol", "Unknown"),
         "step_schema": analysis.get("step_schema", "Unknown"),
         "legacy_step": analysis.get("legacy_step", "unknown"),
-        "strict_turnable": True,
+        "strict_turnable": plan.strict_turnable,
+        "partial_turnable": plan.partial_turnable,
+        "turning_scope": "full" if plan.strict_turnable else "partial",
         "turning_score": plan.turning_score,
+        "recommended_process": analysis.get("recommended_process"),
+        "alternative_processes": analysis.get("alternative_processes", []),
+        "turning_gate_reasons": turning_data.get("reasons", []),
+        "turning_limitations": limitation_reasons,
         "material_profile": plan.material_profile,
         "machine_profile": plan.machine_profile,
         "tolerance_mm": plan.tolerance_mm,

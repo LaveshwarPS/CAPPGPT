@@ -149,6 +149,42 @@ def _tools_table_rows(result: Dict) -> List[Dict]:
     return rows
 
 
+def _render_turning_limits_tab(result: Dict) -> None:
+    scope = result.get("turning_scope", "none")
+    strict_turnable = bool(result.get("strict_turnable", False))
+    partial_turnable = bool(result.get("partial_turnable", False))
+    recommended = result.get("recommended_process")
+    alternatives = result.get("alternative_processes", [])
+    limit_reasons = result.get("turning_limitations", [])
+    gate_reasons = result.get("turning_gate_reasons", [])
+
+    if scope == "full" and strict_turnable:
+        st.success("CAPP scope: FULL TURNING")
+        st.write("Model is fully turnable under the current strict gate.")
+    elif scope == "partial" and partial_turnable:
+        st.warning("CAPP scope: PARTIAL TURNING")
+        st.write("CAPP is generated only for turnable operations. Non-turnable features are excluded.")
+    else:
+        st.error("CAPP scope: NO TURNING")
+        st.write("This model is not suitable for turning CAPP under current rules.")
+
+    if recommended:
+        st.info(f"Best primary process for excluded features: {str(recommended).replace('_', ' ').upper()}")
+    if alternatives:
+        pretty = ", ".join(str(p).replace("_", " ").upper() for p in alternatives)
+        st.write(f"Other process options: {pretty}")
+
+    if limit_reasons:
+        st.write("Turning limitations:")
+        for r in limit_reasons:
+            st.write(f"- {r}")
+
+    if gate_reasons:
+        with st.expander("Detailed gate reasoning"):
+            for reason in gate_reasons:
+                st.write(f"- {reason}")
+
+
 def _render_validation_dialog(result: Dict) -> None:
     validation = result.get("validation") or {}
     status = validation.get("status", "pass")
@@ -284,6 +320,8 @@ def main() -> None:
             st.session_state.chat_history = []
             if result.get("success"):
                 st.success(f"Completed: {uploaded.name}")
+                if result.get("turning_scope") == "partial":
+                    st.warning("Generated limited CAPP: only turnable portion included.")
             else:
                 st.error(result.get("error", "Analysis failed"))
                 recommended = result.get("recommended_process")
@@ -298,13 +336,12 @@ def main() -> None:
                     with st.expander("Why turning was rejected"):
                         for reason in gate_reasons:
                             st.write(f"- {reason}")
-                st.stop()
 
     result = st.session_state.analysis_result
     selected_name = st.session_state.uploaded_name or "N/A"
 
-    tab_ops, tab_tools, tab_summary, tab_ai, tab_chat = st.tabs(
-        ["Operations", "Tools", "Summary", "AI Recommendations", "Chat with AI"]
+    tab_ops, tab_tools, tab_summary, tab_ai, tab_limits, tab_chat = st.tabs(
+        ["Operations", "Tools", "Summary", "AI Recommendations", "Turning Limits", "Chat with AI"]
     )
 
     with tab_ops:
@@ -372,6 +409,12 @@ def main() -> None:
             st.markdown(ai_text)
         else:
             st.info("Run analysis to get AI recommendations.")
+
+    with tab_limits:
+        if result:
+            _render_turning_limits_tab(result)
+        else:
+            st.info("Run analysis to see turning limitations and process guidance.")
 
     with tab_chat:
         st.caption("Ask about process planning, tools, speeds/feeds, or improvements.")
