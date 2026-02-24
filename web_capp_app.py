@@ -90,6 +90,43 @@ def _build_chat_context(result: Dict) -> str:
     )
 
 
+def _operations_table_rows(result: Dict) -> List[Dict]:
+    rows: List[Dict] = []
+    for op in result.get("operations", []):
+        rows.append(
+            {
+                "Op #": op.get("operation_id"),
+                "Operation": op.get("name", ""),
+                "Description": op.get("description", ""),
+                "Type": op.get("type", ""),
+                "Tool": op.get("tool", ""),
+                "RPM": op.get("spindle_speed"),
+                "Feed (mm/rev)": op.get("feed_rate"),
+                "DOC (mm)": op.get("depth_of_cut"),
+                "Coolant": op.get("coolant", ""),
+                "Time (min)": op.get("estimated_time"),
+                "Thread": op.get("thread_spec", ""),
+            }
+        )
+    return rows
+
+
+def _tools_table_rows(result: Dict) -> List[Dict]:
+    rows: List[Dict] = []
+    for tool in result.get("tools", []):
+        rows.append(
+            {
+                "Tool #": tool.get("tool_id"),
+                "Name": tool.get("name", ""),
+                "Type": tool.get("type", ""),
+                "Material": tool.get("material", ""),
+                "Coating": tool.get("coating", ""),
+                "Description": tool.get("description", ""),
+            }
+        )
+    return rows
+
+
 def main() -> None:
     # Keep web app provider fixed to Gemini.
     set_provider("gemini")
@@ -103,6 +140,16 @@ def main() -> None:
 
     st.title("🛠️ CAPP Turning Process Planner")
     st.caption("Upload STEP files and generate optimized turning process plans.")
+    st.markdown(
+        """
+        <style>
+            [data-testid="stDataFrame"] thead th div {
+                white-space: nowrap;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
     with st.sidebar:
         st.header("File & Options")
@@ -156,14 +203,33 @@ def main() -> None:
 
     with tab_ops:
         if result and result.get("operations"):
-            # st.table avoids AG Grid frontend module loading issues on some browsers.
-            st.table(result["operations"])
+            st.dataframe(
+                _operations_table_rows(result),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Description": st.column_config.TextColumn(width="large"),
+                    "Tool": st.column_config.TextColumn(width="medium"),
+                    "Operation": st.column_config.TextColumn(width="medium"),
+                    "Type": st.column_config.TextColumn(width="small"),
+                    "Thread": st.column_config.TextColumn(width="medium"),
+                },
+            )
         else:
             st.info("Run analysis to see operations.")
 
     with tab_tools:
         if result and result.get("tools"):
-            st.table(result["tools"])
+            st.dataframe(
+                _tools_table_rows(result),
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Description": st.column_config.TextColumn(width="large"),
+                    "Name": st.column_config.TextColumn(width="medium"),
+                    "Type": st.column_config.TextColumn(width="medium"),
+                },
+            )
         else:
             st.info("Run analysis to see required tools.")
 
