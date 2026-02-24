@@ -16,10 +16,11 @@ from typing import Dict, List, Optional
 import streamlit as st
 
 from capp_turning_planner import generate_turning_plan
-from chat_ollama import query_ollama, OllamaError, get_provider
+from chat_ollama import query_ollama, OllamaError, get_provider, set_provider
 
 
 OLLAMA_AI_TIMEOUT = int(os.getenv("OLLAMA_AI_TIMEOUT", "120"))
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def _init_state() -> None:
@@ -74,6 +75,9 @@ def _build_chat_context(result: Dict) -> str:
 
 
 def main() -> None:
+    # Keep web app provider fixed to Gemini.
+    set_provider("gemini")
+
     st.set_page_config(
         page_title="CAPP Turning Planner - Web",
         page_icon="🛠️",
@@ -89,8 +93,10 @@ def main() -> None:
         uploaded = st.file_uploader("Select STEP file", type=["step", "stp"])
         with_ai = st.checkbox("Include AI Optimization", value=True)
         save_json = st.checkbox("Prepare JSON Export", value=True)
-        model = st.selectbox("AI Model", ["phi", "llama2", "neural-chat"], index=0)
+        model = GEMINI_MODEL
+        st.markdown("AI Model: `Gemini`")
         st.markdown(f"Provider: `{get_provider()}`")
+        st.markdown(f"Model ID: `{model}`")
         analyze = st.button("Analyze & Generate Plan", use_container_width=True, type="primary")
 
     if analyze:
@@ -162,7 +168,7 @@ def main() -> None:
                 result.get("ai_recommendations", {}).get("optimizations")
                 or "No AI recommendations available."
             )
-            st.text_area("AI Optimization", value=ai_text, height=420)
+            st.markdown(ai_text)
         else:
             st.info("Run analysis to get AI recommendations.")
 
