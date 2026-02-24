@@ -986,7 +986,8 @@ def generate_turning_plan(
     
     # Check if machinable for turning
     if not plan.is_machinable:
-        recommended = analysis.get("recommended_process", "3_axis_milling")
+        recommended = analysis.get("recommended_process") or "3_axis_milling"
+        recommended_text = str(recommended).replace("_", " ")
         alternatives = analysis.get("alternative_processes", [])
         turning_reasons = analysis.get("machinability", {}).get("turning", {}).get("reasons", [])
         print(f"  âŒ Part NOT strictly suitable for turning (score: {plan.turning_score}/100)")
@@ -999,7 +1000,7 @@ def generate_turning_plan(
             "recommended_process": recommended,
             "alternative_processes": alternatives,
             "turning_gate_reasons": turning_reasons,
-            "recommendation": f"Use {recommended.replace('_', ' ')} instead of turning."
+            "recommendation": f"Use {recommended_text} instead of turning."
         }
     
     print(f"  âœ… Part suitable for turning (score: {plan.turning_score}/100)")
