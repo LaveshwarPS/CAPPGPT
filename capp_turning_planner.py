@@ -170,12 +170,20 @@ class TurningProcessPlan:
         self.turning_score = self._get_turning_score()
         self.strict_turnable = bool(turning_data.get("strict_turnable", self.turning_score >= 75))
         strict_checks = turning_data.get("strict_checks", {}) or {}
-        self.partial_turnable = bool(
-            self.turning_score >= 55
-            and strict_checks.get("cylindrical_dominance", False)
-            and strict_checks.get("circular_edge_support", False)
-            and strict_checks.get("reasonable_aspect_ratio", False)
-        )
+        # Partial turning should be easier to pass: keep strict mode for "full turning",
+        # but allow CAPP on clearly rotational subsets of mixed-geometry models.
+        if strict_checks:
+            self.partial_turnable = bool(
+                self.turning_score >= 40
+                and strict_checks.get("cylindrical_dominance", False)
+                and (
+                    strict_checks.get("circular_edge_support", False)
+                    or strict_checks.get("reasonable_aspect_ratio", False)
+                )
+            )
+        else:
+            # Fallback when strict checks are unavailable (older/demo analyzer output).
+            self.partial_turnable = self.turning_score >= 45
         self.is_machinable = self.strict_turnable or self.partial_turnable
         self.operations = []
         self.tools = []
