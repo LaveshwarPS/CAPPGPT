@@ -34,8 +34,8 @@ If git was already initialized, skip `git init`.
 
 This project uses OpenCASCADE through `cadquery-ocp`, which must run on a compatible runtime.
 
-- Keep `runtime.txt` in repo root with:
-  `python-3.12`
+- Streamlit Cloud may run Python 3.13 by default.
+- `requirements.txt` in this repo now includes Python-version-specific VTK pins so OCP can install on both 3.12 and 3.13.
 - Keep `packages.txt` in repo root so Linux shared libs are installed for VTK/OCP.
 
 If the app was already deployed on a different runtime, open app settings and reboot/redeploy
@@ -64,5 +64,5 @@ After deployment, run one analysis and verify:
 If OCP is still unavailable:
 
 1. Clear cache + reboot app in Streamlit settings.
-2. Confirm `runtime.txt` is exactly `python-3.12`.
-3. Confirm `requirements.txt` and `packages.txt` are from latest commit.
+2. Confirm `requirements.txt` and `packages.txt` are from latest commit.
+3. Reboot app after dependency rebuild completes.
