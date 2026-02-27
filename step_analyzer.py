@@ -10,10 +10,35 @@ Date: September 2025
 """
 
 import sys
+import builtins
 from pathlib import Path
 import traceback
 import re
-from typing import Dict
+import math
+from typing import Dict, List, Optional, Tuple
+
+
+_OCP_MODULES_CACHE = None
+_OCP_IMPORT_ERROR = None
+
+
+def _safe_print(*args, **kwargs):
+    """Print safely on terminals that cannot encode some Unicode characters."""
+    try:
+        return builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        flush = kwargs.get("flush", False)
+        file = kwargs.get("file", sys.stdout)
+        encoding = getattr(file, "encoding", None) or "utf-8"
+        text = sep.join(str(arg) for arg in args)
+        sanitized = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        return builtins.print(sanitized, end=end, file=file, flush=flush)
+
+
+# Module-local print wrapper for robust Windows console behavior.
+print = _safe_print
 
 
 def detect_step_protocol(file_path: str) -> Dict[str, str]:
@@ -58,8 +83,22 @@ def safe_input(prompt: str):
         print()
         return None
 
-def setup_imports():
+def setup_imports(verbose: bool = True):
     """Import OpenCASCADE libraries using OCP (pip package)."""
+    global _OCP_MODULES_CACHE, _OCP_IMPORT_ERROR
+
+    if _OCP_MODULES_CACHE is not None:
+        if verbose:
+            print("✅ Successfully imported OCP libraries")
+        return _OCP_MODULES_CACHE
+
+    if _OCP_IMPORT_ERROR is not None:
+        if verbose:
+            print(f"❌ Failed to import OCP libraries: {_OCP_IMPORT_ERROR}")
+            print("Make sure to install cadquery-ocp: pip install cadquery-ocp")
+            print("Running in demo mode with mock data for testing purposes.")
+        return None
+
     try:
         from OCP.STEPControl import STEPControl_Reader
         from OCP.IFSelect import IFSelect_RetDone
@@ -70,8 +109,7 @@ def setup_imports():
         from OCP.GeomAdaptor import GeomAdaptor_Surface
         from OCP.GeomAbs import GeomAbs_Cylinder
         
-        print("✅ Successfully imported OCP libraries")
-        return {
+        _OCP_MODULES_CACHE = {
             'STEPControl_Reader': STEPControl_Reader,
             'IFSelect_RetDone': IFSelect_RetDone,
             'TopAbs_FACE': TopAbs_FACE,
@@ -82,17 +120,24 @@ def setup_imports():
             'GeomAbs_Cylinder': GeomAbs_Cylinder,
             'binding': 'OCP'
         }
+        if verbose:
+            print("✅ Successfully imported OCP libraries")
+        return _OCP_MODULES_CACHE
     except ImportError as e:
-        print(f"❌ Failed to import OCP libraries: {e}")
-        print("Make sure to install cadquery-ocp: pip install cadquery-ocp")
-        print("Running in demo mode with mock data for testing purposes.")
+        _OCP_IMPORT_ERROR = str(e)
+        if verbose:
+            print(f"❌ Failed to import OCP libraries: {e}")
+            print("Make sure to install cadquery-ocp: pip install cadquery-ocp")
+            print("Running in demo mode with mock data for testing purposes.")
         return None
 
 
-def read_step_file(path: str, ocp_modules):
+def read_step_file(path: str, ocp_modules, include_reader_meta: bool = False):
     """Read a STEP file and return the shape."""
     if not ocp_modules:
         print("📄 Using mock data for STEP file reading (demo mode)")
+        if include_reader_meta:
+            return "MOCK_SHAPE", {"root_entities": 0}
         return "MOCK_SHAPE"
         
     STEPControl_Reader = ocp_modules['STEPControl_Reader']
@@ -102,8 +147,12 @@ def read_step_file(path: str, ocp_modules):
     status = reader.ReadFile(path)
     if status != IFSelect_RetDone:
         raise RuntimeError("STEP read failed")
+    root_entities = reader.NbRootsForTransfer()
     reader.TransferRoots()
-    return reader.OneShape()
+    shape = reader.OneShape()
+    if include_reader_meta:
+        return shape, {"root_entities": int(root_entities)}
+    return shape
 
 
 def count_cylindrical_faces(shape, ocp_modules) -> int:
@@ -133,7 +182,12 @@ def count_cylindrical_faces(shape, ocp_modules) -> int:
     return count
 
 
-def get_model_description(path: str, ocp_modules) -> dict:
+def get_model_description(
+    path: str,
+    ocp_modules,
+    shape=None,
+    root_entities: Optional[int] = None,
+) -> dict:
     """
     Extract detailed description and metadata from a STEP file.
     
@@ -185,16 +239,12 @@ def get_model_description(path: str, ocp_modules) -> dict:
             }
         }
     
-    from OCP.STEPControl import STEPControl_Reader
-    from OCP.IFSelect import IFSelect_RetDone
-    from OCP.TopAbs import TopAbs_FACE, TopAbs_EDGE, TopAbs_VERTEX
-    from OCP.TopExp import TopExp_Explorer
-    from OCP.TopoDS import TopoDS
-    from OCP.BRep import BRep_Tool
-    from OCP.GeomAdaptor import GeomAdaptor_Surface
-    from OCP.GeomAbs import (GeomAbs_Cylinder, GeomAbs_Plane, GeomAbs_Sphere, 
-                            GeomAbs_Cone, GeomAbs_Torus, GeomAbs_BezierSurface,
-                            GeomAbs_BSplineSurface)
+    TopAbs_FACE = ocp_modules['TopAbs_FACE']
+    TopExp_Explorer = ocp_modules['TopExp_Explorer']
+    TopoDS = ocp_modules['TopoDS']
+    BRep_Tool = ocp_modules['BRep_Tool']
+    GeomAdaptor_Surface = ocp_modules['GeomAdaptor_Surface']
+    from OCP.TopAbs import TopAbs_EDGE, TopAbs_VERTEX
     
     # File information
     file_path = Path(path)
@@ -204,26 +254,20 @@ def get_model_description(path: str, ocp_modules) -> dict:
         "last_modified": datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%Y-%m-%d %H:%M:%S')
     }
     
-    # Read STEP file
-    reader = STEPControl_Reader()
-    status = reader.ReadFile(str(file_path))
-    if status != IFSelect_RetDone:
-        raise RuntimeError("STEP read failed")
+    # Reuse the already-loaded shape to avoid re-reading/parsing the STEP file.
+    if shape is None:
+        shape, reader_meta = read_step_file(str(file_path), ocp_modules, include_reader_meta=True)
+        if root_entities is None:
+            root_entities = reader_meta.get("root_entities", 0)
     
     # Extract header information
     header_data = {}
     try:
-        # Get number of roots
-        nb_roots = reader.NbRootsForTransfer()
-        header_data["root_entities"] = nb_roots
+        header_data["root_entities"] = int(root_entities) if root_entities is not None else 0
         header_data["step_protocol"] = step_protocol.get("protocol", "Unknown")
         header_data["step_schema"] = step_protocol.get("schema", "Unknown")
         header_data["legacy_step"] = step_protocol.get("legacy", "unknown")
-        
-        # Transfer roots
-        reader.TransferRoots()
-        shape = reader.OneShape()
-        
+
         # Count geometry elements
         geometry_stats = {}
         geometry_stats["faces"] = count_explorer_items(shape, TopAbs_FACE, TopExp_Explorer)
@@ -306,7 +350,139 @@ def count_surface_types(shape, TopoDS, BRep_Tool, GeomAdaptor_Surface):
     return surface_types
 
 
-def analyze_machinability(shape, ocp_modules):
+def _normalize_vector(vec: Tuple[float, float, float]) -> Optional[Tuple[float, float, float]]:
+    mag = math.sqrt((vec[0] ** 2) + (vec[1] ** 2) + (vec[2] ** 2))
+    if mag <= 1e-9:
+        return None
+    return (vec[0] / mag, vec[1] / mag, vec[2] / mag)
+
+
+def _dot(a: Tuple[float, float, float], b: Tuple[float, float, float]) -> float:
+    return (a[0] * b[0]) + (a[1] * b[1]) + (a[2] * b[2])
+
+
+def _extract_rotational_axes(shape, TopoDS, BRep_Tool, GeomAdaptor_Surface) -> List[Tuple[float, float, float]]:
+    """Extract axis directions from cylindrical and conical faces."""
+    from OCP.TopAbs import TopAbs_FACE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.GeomAbs import GeomAbs_Cylinder, GeomAbs_Cone
+
+    axes: List[Tuple[float, float, float]] = []
+    explorer = TopExp_Explorer(shape, TopAbs_FACE)
+    while explorer.More():
+        face = TopoDS.Face_s(explorer.Current())
+        surface = BRep_Tool.Surface_s(face)
+        adaptor = GeomAdaptor_Surface(surface)
+        surface_type = adaptor.GetType()
+        axis = None
+
+        try:
+            if surface_type == GeomAbs_Cylinder:
+                axis = adaptor.Cylinder().Axis()
+            elif surface_type == GeomAbs_Cone:
+                axis = adaptor.Cone().Axis()
+        except Exception:
+            axis = None
+
+        if axis is not None:
+            try:
+                direction = axis.Direction()
+                vec = (float(direction.X()), float(direction.Y()), float(direction.Z()))
+                normalized = _normalize_vector(vec)
+                if normalized is not None:
+                    axes.append(normalized)
+            except Exception:
+                pass
+
+        explorer.Next()
+    return axes
+
+
+def _extract_circular_edge_axes(shape, TopoDS, BRep_Tool, GeomAdaptor_Curve) -> List[Tuple[float, float, float]]:
+    """Extract axis directions from circular edges."""
+    from OCP.TopAbs import TopAbs_EDGE
+    from OCP.TopExp import TopExp_Explorer
+    from OCP.GeomAbs import GeomAbs_Circle
+
+    axes: List[Tuple[float, float, float]] = []
+    explorer = TopExp_Explorer(shape, TopAbs_EDGE)
+    while explorer.More():
+        edge = TopoDS.Edge_s(explorer.Current())
+        try:
+            curve_data = BRep_Tool.Curve_s(edge, 0, 1)
+            if isinstance(curve_data, tuple):
+                curve = curve_data[0]
+            else:
+                curve = curve_data
+            if not curve:
+                explorer.Next()
+                continue
+            adaptor = GeomAdaptor_Curve(curve)
+            if adaptor.GetType() == GeomAbs_Circle:
+                axis = adaptor.Circle().Axis()
+                direction = axis.Direction()
+                vec = (float(direction.X()), float(direction.Y()), float(direction.Z()))
+                normalized = _normalize_vector(vec)
+                if normalized is not None:
+                    axes.append(normalized)
+        except Exception:
+            pass
+        explorer.Next()
+    return axes
+
+
+def _compute_best_fit_axis(rot_axes: List[Tuple[float, float, float]]) -> Dict[str, float]:
+    """Compute best-fit axis and aligned ratio from rotational face axes."""
+    if not rot_axes:
+        return {
+            "available": False,
+            "axis_x": 0.0,
+            "axis_y": 0.0,
+            "axis_z": 1.0,
+            "aligned_ratio_8deg": 0.0,
+            "aligned_ratio_15deg": 0.0,
+            "mean_misalignment_deg": 90.0,
+        }
+
+    seed = rot_axes[0]
+    accum = [seed[0], seed[1], seed[2]]
+    for axis in rot_axes[1:]:
+        sign = 1.0 if _dot(seed, axis) >= 0 else -1.0
+        accum[0] += axis[0] * sign
+        accum[1] += axis[1] * sign
+        accum[2] += axis[2] * sign
+
+    best = _normalize_vector((accum[0], accum[1], accum[2]))
+    if best is None:
+        best = seed
+
+    cos_8 = math.cos(math.radians(8.0))
+    cos_15 = math.cos(math.radians(15.0))
+    aligned_8 = 0
+    aligned_15 = 0
+    misalignment: List[float] = []
+
+    for axis in rot_axes:
+        cos_angle = min(1.0, max(0.0, abs(_dot(best, axis))))
+        if cos_angle >= cos_8:
+            aligned_8 += 1
+        if cos_angle >= cos_15:
+            aligned_15 += 1
+        misalignment.append(math.degrees(math.acos(cos_angle)))
+
+    count = len(rot_axes)
+    return {
+        "available": True,
+        "axis_x": round(best[0], 4),
+        "axis_y": round(best[1], 4),
+        "axis_z": round(best[2], 4),
+        "aligned_ratio_8deg": aligned_8 / count,
+        "aligned_ratio_15deg": aligned_15 / count,
+        "mean_misalignment_deg": round(sum(misalignment) / count, 2),
+    }
+
+
+def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, int]] = None):
     """
     Analyze the machinability of a 3D model for different manufacturing processes.
     
@@ -379,10 +555,23 @@ def analyze_machinability(shape, ocp_modules):
                             GeomAbs_BSplineSurface, GeomAbs_Line, GeomAbs_Circle)
     from OCP.BRepBndLib import BRepBndLib
     from OCP.Bnd import Bnd_Box
-    import math
     
-    # Get surface types
-    surface_types = count_surface_types(shape, TopoDS, BRep_Tool, GeomAdaptor_Surface)
+    # Get surface types (allow reuse of precomputed values to avoid another full face pass).
+    if not surface_types:
+        surface_types = count_surface_types(shape, TopoDS, BRep_Tool, GeomAdaptor_Surface)
+    else:
+        defaults = {
+            "Plane": 0,
+            "Cylinder": 0,
+            "Sphere": 0,
+            "Cone": 0,
+            "Torus": 0,
+            "BezierSurface": 0,
+            "BSplineSurface": 0,
+            "Other": 0,
+        }
+        defaults.update({k: int(v) for k, v in surface_types.items()})
+        surface_types = defaults
     
     # Get bounding box to determine overall size
     bbox = Bnd_Box()
@@ -492,11 +681,48 @@ def analyze_machinability(shape, ocp_modules):
     aspect_ratio = z_size / radial_size
 
     complexity_ratio = complex_surfaces / total_surfaces
+    rotational_axes = _extract_rotational_axes(shape, TopoDS, BRep_Tool, GeomAdaptor_Surface)
+    circular_axes = _extract_circular_edge_axes(shape, TopoDS, BRep_Tool, GeomAdaptor_Curve)
+    axis_sources = rotational_axes + circular_axes
+    axis_fit = _compute_best_fit_axis(axis_sources)
+    rotational_face_count = surface_types["Cylinder"] + surface_types["Cone"]
+    rotational_face_ratio = rotational_face_count / total_surfaces
+    minor_non_rotational_faces = max(total_surfaces - rotational_face_count, 0)
+    minor_non_rotational_ratio = minor_non_rotational_faces / total_surfaces
+
+    # Tolerance bands:
+    # - 8 deg: strict alignment for full turning
+    # - 15 deg: relaxed alignment for partial turning recommendation
+    # - 35% non-rotational surface allowance for "turnable majority" models
+    axisymmetric_bestfit = bool(axis_fit["available"] and axis_fit["aligned_ratio_8deg"] >= 0.60)
+    axisymmetric_relaxed = bool(axis_fit["available"] and axis_fit["aligned_ratio_15deg"] >= 0.72)
+    rotational_evidence = rotational_face_ratio + circular_edge_ratio
+    turnable_majority = bool(
+        axisymmetric_relaxed
+        and (
+            rotational_face_ratio >= 0.18
+            or circular_edge_ratio >= 0.18
+            or rotational_evidence >= 0.36
+        )
+        and minor_non_rotational_ratio <= 0.85
+    )
+    small_asymmetry_ok = bool(
+        minor_non_rotational_faces <= 12
+        or minor_non_rotational_ratio <= 0.45
+        or (
+            axis_fit["available"]
+            and axis_fit["aligned_ratio_8deg"] >= 0.70
+            and circular_edge_ratio >= 0.20
+        )
+    )
+
     strict_checks = {
-        # Many imported STEP files are not perfectly axis-aligned; keep this strict but realistic.
-        "axisymmetric_xy": xy_delta_ratio <= 0.25,
-        "cylindrical_dominance": cylindrical_ratio >= 0.20 or surface_types["Cylinder"] >= 8,
-        "circular_edge_support": circular_edge_ratio >= 0.06 or edge_types["Circle"] >= 10,
+        # Use best-fit rotational axis from geometry, not global XYZ assumptions.
+        "axisymmetric_xy": axisymmetric_bestfit,
+        "turnable_majority": turnable_majority,
+        "small_asymmetry_ok": small_asymmetry_ok,
+        "cylindrical_dominance": (surface_types["Cylinder"] + surface_types["Cone"]) >= 4 or rotational_face_ratio >= 0.12,
+        "circular_edge_support": circular_edge_ratio >= 0.04 or edge_types["Circle"] >= 6,
         # Allow moderate freeform detail; block only when freeform dominates most of the part.
         "limited_complexity": not (complex_surfaces > 40 and complexity_ratio > 0.75),
         "reasonable_aspect_ratio": 0.2 <= aspect_ratio <= 12.0,
@@ -504,20 +730,50 @@ def analyze_machinability(shape, ocp_modules):
 
     if strict_checks["axisymmetric_xy"]:
         turning_score += 28
-        turning_reasons.append(f"Near-axisymmetric envelope in X/Y (delta ratio {xy_delta_ratio:.2f}).")
+        turning_reasons.append(
+            f"Best-fit rotational axis found ({axis_fit['axis_x']:.2f}, {axis_fit['axis_y']:.2f}, {axis_fit['axis_z']:.2f}) "
+            f"with strict alignment ratio {axis_fit['aligned_ratio_8deg']:.2f} from {len(axis_sources)} axis cues."
+        )
     else:
         turning_score -= 20
-        turning_reasons.append(f"X/Y envelope mismatch is high (delta ratio {xy_delta_ratio:.2f}).")
+        turning_reasons.append(
+            f"Rotational-axis alignment is weak (strict ratio {axis_fit['aligned_ratio_8deg']:.2f}, "
+            f"relaxed ratio {axis_fit['aligned_ratio_15deg']:.2f})."
+        )
+
+    if strict_checks["turnable_majority"]:
+        turning_score += 16
+        turning_reasons.append(
+            f"Turnable-majority geometry detected (faces {rotational_face_ratio:.2f}, edges {circular_edge_ratio:.2f}, "
+            f"combined evidence {rotational_evidence:.2f})."
+        )
+    else:
+        turning_score -= 8
+        turning_reasons.append(
+            f"Rotational majority is limited (faces {rotational_face_ratio:.2f}, edges {circular_edge_ratio:.2f}, "
+            f"combined evidence {rotational_evidence:.2f})."
+        )
+
+    if strict_checks["small_asymmetry_ok"]:
+        turning_score += 6
+        turning_reasons.append(
+            f"Minor asymmetric details are within tolerance ({minor_non_rotational_faces} faces, ratio {minor_non_rotational_ratio:.2f})."
+        )
+    else:
+        turning_score -= 6
+        turning_reasons.append(
+            f"Asymmetric detail volume is too high for clean turning ({minor_non_rotational_faces} faces, ratio {minor_non_rotational_ratio:.2f})."
+        )
 
     if strict_checks["cylindrical_dominance"]:
-        turning_score += 28
+        turning_score += 20
         turning_reasons.append(f"Cylindrical surface support is strong ({surface_types['Cylinder']} cylinders, ratio {cylindrical_ratio:.2f}).")
     else:
         turning_score -= 15
         turning_reasons.append(f"Low cylindrical dominance ({surface_types['Cylinder']} cylinders, ratio {cylindrical_ratio:.2f}).")
 
     if strict_checks["circular_edge_support"]:
-        turning_score += 22
+        turning_score += 18
         turning_reasons.append(f"Circular edge support is strong ({edge_types['Circle']} circular edges, ratio {circular_edge_ratio:.2f}).")
     else:
         turning_score -= 10
@@ -537,15 +793,24 @@ def analyze_machinability(shape, ocp_modules):
         turning_score -= 12
         turning_reasons.append(f"Aspect ratio {aspect_ratio:.2f}:1 is outside strict turning range.")
 
-    turning_score = max(0, min(100, turning_score + 20))
+    # Keep envelope-based signal as a soft fallback only (for low-feature models).
+    if not axis_fit["available"] and xy_delta_ratio <= 0.25:
+        turning_score += 8
+        turning_reasons.append(
+            f"Fallback envelope symmetry supports turning (X/Y delta ratio {xy_delta_ratio:.2f})."
+        )
+
+    turning_score = max(0, min(100, turning_score + 16))
     # Primary gate: must satisfy rotational geometry checks and not be overwhelmingly freeform.
     strict_turnable = (
         strict_checks["axisymmetric_xy"]
+        and strict_checks["turnable_majority"]
+        and strict_checks["small_asymmetry_ok"]
         and strict_checks["cylindrical_dominance"]
         and strict_checks["circular_edge_support"]
         and strict_checks["reasonable_aspect_ratio"]
         and strict_checks["limited_complexity"]
-        and turning_score >= 68
+        and turning_score >= 66
     )
     if strict_turnable:
         turning_reasons.append("Strict turning gate passed: geometry qualifies for CAPP turning workflow.")
@@ -558,6 +823,13 @@ def analyze_machinability(shape, ocp_modules):
         "feasibility": "High" if strict_turnable else "Medium" if turning_score > 55 else "Low",
         "strict_turnable": strict_turnable,
         "strict_checks": strict_checks,
+        "axis_analysis": axis_fit,
+        "axis_cue_count": len(axis_sources),
+        "surface_axis_count": len(rotational_axes),
+        "circular_edge_axis_count": len(circular_axes),
+        "turnable_majority_ratio": round(rotational_face_ratio, 3),
+        "rotational_evidence_ratio": round(rotational_evidence, 3),
+        "minor_asymmetry_ratio": round(minor_non_rotational_ratio, 3),
         "reasons": turning_reasons
     }
     
@@ -603,6 +875,10 @@ def analyze_machinability(shape, ocp_modules):
     # Generate machining requirements based on the recommended process
     machining_requirements = []
     
+    size_sorted = sorted([dimensions["x_size"], dimensions["y_size"], dimensions["z_size"]])
+    turning_length = size_sorted[2]
+    turning_diameter = (size_sorted[0] + size_sorted[1]) / 2.0
+
     if recommended_process == "3_axis_milling":
         machining_requirements = [
             f"Workpiece material: Select based on hardness and machinability",
@@ -613,8 +889,8 @@ def analyze_machinability(shape, ocp_modules):
         ]
     elif recommended_process == "turning":
         machining_requirements = [
-            f"Workpiece material: Round stock with diameter ≥ {max(dimensions['y_size'], dimensions['z_size']):.1f} mm",
-            f"Machine: CNC lathe with minimum length capacity of {dimensions['x_size']:.1f} mm",
+            f"Workpiece material: Round stock with diameter ≥ {turning_diameter:.1f} mm",
+            f"Machine: CNC lathe with minimum length capacity of {turning_length:.1f} mm",
             f"Tooling: External turning tools, boring bars for internal features",
             f"Fixturing: Standard chuck with appropriate jaws",
             f"Operations: Facing, turning, and potentially milling for non-axisymmetric features"
@@ -764,15 +1040,32 @@ def find_step_file(path: str = None) -> str:
                 print("❌ File not found. Please enter 'upload' or a valid file path.")
 
 
-def analyze_step_file(file_path: str = None):
+def analyze_step_file(file_path: str = None, allow_demo_mode: Optional[bool] = None):
     """Main function to analyze a STEP file and count cylindrical faces."""
     print("🔧 STEP File Analyzer - Cylindrical Face Counter")
     print("=" * 50)
     
     try:
+        if allow_demo_mode is None:
+            import os
+            allow_demo_mode = str(os.getenv("CAPP_ALLOW_DEMO_MODE", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+
         # Setup imports
         ocp_modules = setup_imports()
         if ocp_modules is None:
+            if not allow_demo_mode:
+                error = (
+                    "OpenCASCADE/OCP libraries are unavailable. Real STEP analysis cannot run. "
+                    "Install cadquery-ocp (and use a supported Python runtime), or set "
+                    "CAPP_ALLOW_DEMO_MODE=1 to allow mock/demo analysis."
+                )
+                print(f"❌ {error}")
+                return {"success": False, "error": error, "demo_mode": True}
             print("⚠️ Running in DEMO MODE with mock data (OCP libraries not available)")
         else:
             print(f"✅ Successfully imported OCP libraries")
@@ -786,19 +1079,30 @@ def analyze_step_file(file_path: str = None):
         
         # Read STEP file
         print(f"📖 Reading STEP file: {step_file_path}")
-        shape = read_step_file(step_file_path, ocp_modules)
-        
-        # Analyze cylindrical faces
-        print("🔍 Analyzing geometry...")
-        cylinder_count = count_cylindrical_faces(shape, ocp_modules)
-        
+        shape, read_meta = read_step_file(step_file_path, ocp_modules, include_reader_meta=True)
+
         # Get detailed model description
         print("\n📋 Extracting model description and metadata...")
-        model_info = get_model_description(step_file_path, ocp_modules)
+        model_info = get_model_description(
+            step_file_path,
+            ocp_modules,
+            shape=shape,
+            root_entities=read_meta.get("root_entities", 0),
+        )
         
+        # Reuse surface statistics instead of traversing geometry twice.
+        cylinder_count = int((model_info.get("surface_types") or {}).get("Cylinder", 0))
+        if cylinder_count == 0 and ocp_modules:
+            print("🔍 Cylindrical-face fallback pass...")
+            cylinder_count = count_cylindrical_faces(shape, ocp_modules)
+
         # Analyze machinability
         print("\n🔧 Analyzing machinability for different manufacturing processes...")
-        machinability_info = analyze_machinability(shape, ocp_modules)
+        machinability_info = analyze_machinability(
+            shape,
+            ocp_modules,
+            surface_types=model_info.get("surface_types"),
+        )
         
         # Display results
         print("\n" + "=" * 50)
@@ -882,12 +1186,14 @@ def analyze_step_file(file_path: str = None):
             'cylindrical_faces': cylinder_count,
             'model_info': model_info,
             'machinability': machinability_info['machinability'],
+            'dimensions': machinability_info.get('dimensions', {}),
             'recommended_process': machinability_info.get('recommended_process'),
             'alternative_processes': machinability_info.get('alternative_processes', []),
             'step_protocol': model_info.get("header_data", {}).get("step_protocol", "Unknown"),
             'step_schema': model_info.get("header_data", {}).get("step_schema", "Unknown"),
             'legacy_step': model_info.get("header_data", {}).get("legacy_step", "unknown"),
-            'success': True
+            'success': True,
+            'demo_mode': bool(ocp_modules is None),
         }
         
     except FileNotFoundError as e:

@@ -13,6 +13,9 @@ Environment Variables:
 
 import json
 import os
+import copy
+import sys
+import builtins
 from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from datetime import datetime
@@ -22,6 +25,27 @@ from chat_ollama import query_ollama, OllamaError, set_model
 
 # Configuration from environment variables
 OLLAMA_AI_TIMEOUT = int(os.getenv("OLLAMA_AI_TIMEOUT", "120"))
+PLAN_CACHE_MAX = max(1, int(os.getenv("CAPP_PLAN_CACHE_MAX", "12")))
+_PLAN_CACHE: Dict[str, Dict] = {}
+
+
+def _safe_print(*args, **kwargs):
+    """Print safely on terminals that cannot encode some Unicode characters."""
+    try:
+        return builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        sep = kwargs.get("sep", " ")
+        end = kwargs.get("end", "\n")
+        flush = kwargs.get("flush", False)
+        file = kwargs.get("file", sys.stdout)
+        encoding = getattr(file, "encoding", None) or "utf-8"
+        text = sep.join(str(arg) for arg in args)
+        sanitized = text.encode(encoding, errors="replace").decode(encoding, errors="replace")
+        return builtins.print(sanitized, end=end, file=file, flush=flush)
+
+
+# Module-local print wrapper for robust Windows console behavior.
+print = _safe_print
 
 TOP_MATERIALS_INDIA = [
     "EN8 / EN8D",
@@ -142,6 +166,54 @@ SPECIFIC_POWER_KW_PER_CM3_MIN = {
 }
 
 
+def _make_file_signature(step_file: str) -> str:
+    path = Path(step_file)
+    try:
+        stat = path.stat()
+        return f"{path.resolve()}::{stat.st_size}::{stat.st_mtime_ns}"
+    except Exception:
+        return str(path)
+
+
+def _build_plan_cache_key(
+    step_file: str,
+    model: str,
+    with_ai: bool,
+    save_json: bool,
+    allow_demo_mode: bool,
+    material_profile: str,
+    machine_profile: str,
+    tolerance_mm: Optional[float],
+    surface_roughness_ra: Optional[float],
+) -> str:
+    payload = {
+        "file": _make_file_signature(step_file),
+        "model": model,
+        "with_ai": bool(with_ai),
+        "save_json": bool(save_json),
+        "allow_demo_mode": bool(allow_demo_mode),
+        "material_profile": material_profile,
+        "machine_profile": machine_profile,
+        "tolerance_mm": tolerance_mm,
+        "surface_roughness_ra": surface_roughness_ra,
+    }
+    return json.dumps(payload, sort_keys=True, default=str)
+
+
+def _cache_get(cache_key: str) -> Optional[Dict]:
+    cached = _PLAN_CACHE.get(cache_key)
+    if cached is None:
+        return None
+    return copy.deepcopy(cached)
+
+
+def _cache_put(cache_key: str, result: Dict) -> None:
+    _PLAN_CACHE[cache_key] = copy.deepcopy(result)
+    while len(_PLAN_CACHE) > PLAN_CACHE_MAX:
+        oldest = next(iter(_PLAN_CACHE))
+        _PLAN_CACHE.pop(oldest, None)
+
+
 class TurningProcessPlan:
     """Represents a turning process plan for a STEP file."""
     
@@ -212,17 +284,24 @@ class TurningProcessPlan:
         Returns:
             Dictionary with diameter, length, and other dimensions.
         """
-        machinability = self.analysis.get("machinability", {})
-        dimensions = machinability.get("dimensions", {})
-        
-        # Extract dimensions with defaults
-        x_size = max(dimensions.get("x_size", 20), 0.1)
-        y_size = max(dimensions.get("y_size", 20), 0.1)
-        z_size = max(dimensions.get("z_size", 50), 0.1)
-        
+        dimensions = self.analysis.get("dimensions", {}) or {}
+        if not dimensions:
+            # Backward compatibility with older analyzer payloads.
+            dimensions = self.analysis.get("machinability", {}).get("dimensions", {}) or {}
+
+        x_size = max(float(dimensions.get("x_size", 20)), 0.1)
+        y_size = max(float(dimensions.get("y_size", 20)), 0.1)
+        z_size = max(float(dimensions.get("z_size", 50)), 0.1)
+        size_sorted = sorted([x_size, y_size, z_size])
+
+        # Orientation-agnostic lathe approximation:
+        # use the largest span as turning length, and radial envelope from the other two spans.
+        length = size_sorted[2]
+        diameter = (size_sorted[0] + size_sorted[1]) / 2.0
+
         return {
-            "diameter": max(x_size, y_size),
-            "length": z_size,
+            "diameter": diameter,
+            "length": length,
             "volume": max(dimensions.get("volume", 0), 0),
             "x_size": x_size,
             "y_size": y_size,
@@ -341,18 +420,31 @@ class TurningProcessPlan:
             "estimated_time": 2.0,
         })
 
-        if diameter > 20:
-            add_operation({
-                "name": "Rough Turning",
-                "description": "Remove material from outer diameter",
-                "type": "turning",
-                "tool": "Turning insert (VNMG)",
-                "spindle_speed": self._calculate_spindle_speed(diameter * 0.8, "rough"),
-                "feed_rate": 0.20,
-                "depth_of_cut": 2.0,
-                "coolant": "flood",
-                "estimated_time": self._estimate_turning_time(diameter, length, 2.0, 0.20),
-            })
+        rough_depth = 2.0 if diameter > 20 else 1.0
+        rough_feed = 0.20 if diameter > 20 else 0.14
+        add_operation({
+            "name": "Rough Turning",
+            "description": "Primary stock removal from outer diameter before any finish passes",
+            "type": "turning",
+            "tool": "Turning insert (VNMG)",
+            "spindle_speed": self._calculate_spindle_speed(diameter * 0.8, "rough"),
+            "feed_rate": rough_feed,
+            "depth_of_cut": rough_depth,
+            "coolant": "flood",
+            "estimated_time": self._estimate_turning_time(diameter, length, rough_depth, rough_feed),
+        })
+
+        add_operation({
+            "name": "Semi-Finish Turning",
+            "description": "Stabilize geometry and leave uniform stock for finish turning",
+            "type": "turning",
+            "tool": "Semi-finish insert (VNMG, R0.4)",
+            "spindle_speed": self._calculate_spindle_speed(diameter * 0.95, "finish"),
+            "feed_rate": 0.14,
+            "depth_of_cut": 0.8 if diameter > 20 else 0.4,
+            "coolant": "flood",
+            "estimated_time": self._estimate_turning_time(diameter, length, 0.8 if diameter > 20 else 0.4, 0.14),
+        })
 
         finish_desc = "Achieve final diameter and surface finish"
         if self.tolerance_mm is not None or self.surface_roughness_ra is not None:
@@ -385,18 +477,17 @@ class TurningProcessPlan:
                 "estimated_time": self._estimate_turning_time(diameter, length, 0.2, 0.05),
             })
 
-        cylindrical_faces = self.analysis.get("cylindrical_faces", 0)
-        if cylindrical_faces > 2:
+        if features["grooving"]["detected"]:
             add_operation({
-                "name": "Boring",
-                "description": "Machine internal cylindrical features",
-                "type": "boring",
-                "tool": "Boring bar with insert",
-                "spindle_speed": self._calculate_spindle_speed(diameter * 0.5, "boring"),
-                "feed_rate": 0.12,
-                "depth_of_cut": 1.0,
+                "name": "Grooving",
+                "description": "Cut grooves for stress relief (geometry-detected)",
+                "type": "grooving",
+                "tool": "Grooving insert",
+                "spindle_speed": self._calculate_spindle_speed(diameter * 0.7, "grooving"),
+                "feed_rate": 0.15,
+                "depth_of_cut": 0.8,
                 "coolant": "flood",
-                "estimated_time": 3.0,
+                "estimated_time": 1.5,
             })
 
         if features["threading"]["detected"]:
@@ -413,17 +504,18 @@ class TurningProcessPlan:
                 "thread_spec": "M10 x 1.5 (example)",
             })
 
-        if features["grooving"]["detected"]:
+        cylindrical_faces = self.analysis.get("cylindrical_faces", 0)
+        if cylindrical_faces > 2:
             add_operation({
-                "name": "Grooving",
-                "description": "Cut grooves for stress relief (geometry-detected)",
-                "type": "grooving",
-                "tool": "Grooving insert",
-                "spindle_speed": self._calculate_spindle_speed(diameter * 0.7, "grooving"),
-                "feed_rate": 0.15,
-                "depth_of_cut": 0.8,
+                "name": "Boring",
+                "description": "Machine internal cylindrical features",
+                "type": "boring",
+                "tool": "Boring bar with insert",
+                "spindle_speed": self._calculate_spindle_speed(diameter * 0.5, "boring"),
+                "feed_rate": 0.12,
+                "depth_of_cut": 1.0,
                 "coolant": "flood",
-                "estimated_time": 1.5,
+                "estimated_time": 3.0,
             })
 
         add_operation({
@@ -538,6 +630,7 @@ class TurningProcessPlan:
         has_threading_op = any(op.get("type") == "threading" for op in self.operations)
         has_grooving_op = any(op.get("type") == "grooving" for op in self.operations)
         has_fine_finish = any(op.get("type") == "finishing" for op in self.operations)
+        op_index = {op.get("name"): idx for idx, op in enumerate(self.operations)}
 
         if has_threading_op == threading_detected:
             messages.append({
@@ -577,6 +670,27 @@ class TurningProcessPlan:
                 "level": "fail",
                 "title": "Tolerance/Ra Rule",
                 "detail": "Finish pass logic did not match tolerance/Ra thresholds.",
+            })
+
+        sequence_ok = (
+            op_index.get("Rough Turning", 10**6) < op_index.get("Semi-Finish Turning", -1)
+            and op_index.get("Semi-Finish Turning", 10**6) < op_index.get("Finish Turning", -1)
+        )
+        feature_ops = {"Grooving", "Threading", "Boring"}
+        feature_indices = [idx for name, idx in op_index.items() if name in feature_ops]
+        finish_anchor = op_index.get("Fine Finish Pass", op_index.get("Finish Turning", -1))
+        features_after_finish = all(idx > finish_anchor for idx in feature_indices)
+        if sequence_ok and features_after_finish:
+            messages.append({
+                "level": "pass",
+                "title": "Operation Sequence",
+                "detail": "Sequence follows rough -> semi-finish -> finish -> feature operations.",
+            })
+        else:
+            messages.append({
+                "level": "fail",
+                "title": "Operation Sequence",
+                "detail": "Operation order violates machining flow (rough, semi-finish, finish, then features).",
             })
 
         if dimensions["diameter"] > limits["max_turning_diameter_mm"]:
@@ -956,6 +1070,7 @@ def generate_turning_plan(
     model: str = "phi",
     with_ai: bool = True,
     save_json: bool = False,
+    allow_demo_mode: bool = False,
     material_profile: str = DEFAULT_MATERIAL_PROFILE,
     machine_profile: str = DEFAULT_MACHINE_PROFILE,
     tolerance_mm: Optional[float] = None,
@@ -968,6 +1083,7 @@ def generate_turning_plan(
         model: Ollama model to use.
         with_ai: If True, generate AI recommendations.
         save_json: If True, save plan to JSON file.
+        allow_demo_mode: If True, allow mock analysis when OCP is unavailable.
         material_profile: Workpiece material profile used for speed logic.
         machine_profile: Lathe machine profile used for RPM limits.
         tolerance_mm: Optional dimensional tolerance target in mm.
@@ -976,20 +1092,42 @@ def generate_turning_plan(
     Returns:
         Dictionary with plan results.
     """
-    print(f"ðŸ“Š Analyzing STEP file for turning feasibility: {step_file}")
-    
-    # Analyze the STEP file
-    print("  â³ Running geometry analysis...")
-    analysis = analyze_step_file(step_file)
-    
+    cache_key = _build_plan_cache_key(
+        step_file=step_file,
+        model=model,
+        with_ai=with_ai,
+        save_json=save_json,
+        allow_demo_mode=allow_demo_mode,
+        material_profile=material_profile,
+        machine_profile=machine_profile,
+        tolerance_mm=tolerance_mm,
+        surface_roughness_ra=surface_roughness_ra,
+    )
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        print(f"Using cached turning plan: {Path(step_file).name}")
+        return cached
+
+    print(f"Analyzing STEP file for turning feasibility: {step_file}")
+
+    # Analyze the STEP file.
+    print("  Running geometry analysis...")
+    analysis = analyze_step_file(step_file, allow_demo_mode=allow_demo_mode)
+
     if not analysis.get("success"):
-        print(f"  âŒ Analysis failed: {analysis.get('error')}")
-        return {"success": False, "error": analysis.get("error")}
-    
-    print("  âœ… Analysis complete")
-    
-    # Create process plan
-    print("\nðŸ”§ Generating turning process plan...")
+        print(f"  Analysis failed: {analysis.get('error')}")
+        failed = {
+            "success": False,
+            "error": analysis.get("error"),
+            "demo_mode": bool(analysis.get("demo_mode", False)),
+        }
+        _cache_put(cache_key, failed)
+        return failed
+
+    print("  Analysis complete")
+
+    # Create process plan.
+    print("\nGenerating turning process plan...")
     plan = TurningProcessPlan(
         analysis,
         model=model,
@@ -998,12 +1136,15 @@ def generate_turning_plan(
         tolerance_mm=tolerance_mm,
         surface_roughness_ra=surface_roughness_ra,
     )
-    
+
     turning_data = analysis.get("machinability", {}).get("turning", {})
+    dimensions = plan._format_dimensions()
     strict_checks = turning_data.get("strict_checks", {}) or {}
     failing_checks = [k for k, passed in strict_checks.items() if not passed]
     check_reason_map = {
         "axisymmetric_xy": "Part envelope is not axisymmetric enough for full turning-only processing.",
+        "turnable_majority": "Rotational features are not dominant enough to justify turning-first process planning.",
+        "small_asymmetry_ok": "Asymmetric/freeform detail is too high for a clean turning route.",
         "cylindrical_dominance": "Cylindrical content is too low for a robust turning workflow.",
         "circular_edge_support": "Circular edge evidence is weak for rotational manufacturing.",
         "limited_complexity": "Freeform/complex surfaces indicate non-turning features (milling/grinding likely needed).",
@@ -1011,17 +1152,18 @@ def generate_turning_plan(
     }
     limitation_reasons = [check_reason_map.get(k, k) for k in failing_checks]
 
-    # Check if machinable for turning
+    # Check if machinable for turning.
     if not plan.is_machinable:
         recommended = analysis.get("recommended_process") or "3_axis_milling"
         recommended_text = str(recommended).replace("_", " ")
         alternatives = analysis.get("alternative_processes", [])
         turning_reasons = analysis.get("machinability", {}).get("turning", {}).get("reasons", [])
-        print(f"  âŒ Part NOT strictly suitable for turning (score: {plan.turning_score}/100)")
-        print(f"  âš ï¸  Recommended process: {recommended}")
-        return {
+        print(f"  Part NOT strictly suitable for turning (score: {plan.turning_score}/100)")
+        print(f"  Recommended process: {recommended}")
+        failed = {
             "success": False,
             "error": "Part is not strictly turnable for CAPP turning workflow.",
+            "demo_mode": bool(analysis.get("demo_mode", False)),
             "turning_score": plan.turning_score,
             "strict_turnable": False,
             "partial_turnable": False,
@@ -1030,50 +1172,54 @@ def generate_turning_plan(
             "alternative_processes": alternatives,
             "turning_gate_reasons": turning_reasons,
             "turning_limitations": limitation_reasons,
-            "recommendation": f"Use {recommended_text} instead of turning."
+            "dimensions": dimensions,
+            "recommendation": f"Use {recommended_text} instead of turning.",
         }
+        _cache_put(cache_key, failed)
+        return failed
 
     if plan.strict_turnable:
-        print(f"  âœ… Part suitable for full turning CAPP (score: {plan.turning_score}/100)")
+        print(f"  Part suitable for full turning CAPP (score: {plan.turning_score}/100)")
     else:
-        print(f"  âš ï¸ Part is partially turnable; generating limited turning CAPP (score: {plan.turning_score}/100)")
-    
-    # Generate operations
-    print("  â³ Generating turning operations...")
-    plan.generate_operations()
-    print(f"  âœ… Generated {len(plan.operations)} operations")
-    
-    # Generate tool list
-    print("  â³ Generating required tools...")
-    plan.generate_tool_list()
-    print(f"  âœ… Listed {len(plan.tools)} turning tools")
+        print(f"  Part is partially turnable; generating limited turning CAPP (score: {plan.turning_score}/100)")
 
-    # Run validation checks
-    print("  â³ Running rule and machine capability validation...")
+    # Generate operations.
+    print("  Generating turning operations...")
+    plan.generate_operations()
+    print(f"  Generated {len(plan.operations)} operations")
+
+    # Generate tool list.
+    print("  Generating required tools...")
+    plan.generate_tool_list()
+    print(f"  Listed {len(plan.tools)} turning tools")
+
+    # Run validation checks.
+    print("  Running rule and machine capability validation...")
     plan.run_validation_checks()
-    print(f"  âœ… Validation status: {plan.validation.get('status', 'unknown')}")
-    
-    # Generate AI recommendations if requested
+    print(f"  Validation status: {plan.validation.get('status', 'unknown')}")
+
+    # Generate AI recommendations if requested.
     if with_ai:
-        print("  â³ Generating AI optimization recommendations...")
+        print("  Generating AI optimization recommendations...")
         set_model(model)
         plan.generate_ai_recommendations()
-    
-    # Save JSON if requested
+
+    # Save JSON if requested.
     json_file = None
     if save_json:
-        print("  â³ Saving plan to JSON...")
+        print("  Saving plan to JSON...")
         json_file = plan.save_as_json()
-        print(f"  âœ… Saved to: {json_file}")
-    
-    # Generate report
+        print(f"  Saved to: {json_file}")
+
+    # Generate report.
     report = plan.generate_report()
-    
-    return {
+
+    result = {
         "success": True,
         "step_protocol": analysis.get("step_protocol", "Unknown"),
         "step_schema": analysis.get("step_schema", "Unknown"),
         "legacy_step": analysis.get("legacy_step", "unknown"),
+        "demo_mode": bool(analysis.get("demo_mode", False)),
         "strict_turnable": plan.strict_turnable,
         "partial_turnable": plan.partial_turnable,
         "turning_scope": "full" if plan.strict_turnable else "partial",
@@ -1082,6 +1228,12 @@ def generate_turning_plan(
         "alternative_processes": analysis.get("alternative_processes", []),
         "turning_gate_reasons": turning_data.get("reasons", []),
         "turning_limitations": limitation_reasons,
+        "strict_checks": turning_data.get("strict_checks", {}),
+        "dimensions": dimensions,
+        "model_info": analysis.get("model_info", {}),
+        "axis_analysis": turning_data.get("axis_analysis", {}),
+        "axis_cue_count": turning_data.get("axis_cue_count"),
+        "rotational_evidence_ratio": turning_data.get("rotational_evidence_ratio"),
         "material_profile": plan.material_profile,
         "machine_profile": plan.machine_profile,
         "tolerance_mm": plan.tolerance_mm,
@@ -1094,6 +1246,8 @@ def generate_turning_plan(
         "feature_detection": plan.feature_detection,
         "validation": plan.validation,
     }
+    _cache_put(cache_key, result)
+    return result
 
 
 if __name__ == "__main__":

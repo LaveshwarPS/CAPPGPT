@@ -30,6 +30,17 @@ If git was already initialized, skip `git init`.
    `streamlit_app.py`
 5. Click `Deploy`
 
+## 3.1 Runtime and system dependencies (required for OCP)
+
+This project uses OpenCASCADE through `cadquery-ocp`, which must run on a compatible runtime.
+
+- Keep `runtime.txt` in repo root with:
+  `python-3.12`
+- Keep `packages.txt` in repo root so Linux shared libs are installed for VTK/OCP.
+
+If the app was already deployed on a different runtime, open app settings and reboot/redeploy
+after pushing these files.
+
 ## 4. Add Gemini key in Streamlit secrets
 
 In Streamlit app settings, add this to Secrets:
@@ -41,3 +52,17 @@ GEMINI_MODEL = "gemini-2.5-flash"
 ```
 
 Do not commit API keys to source files.
+
+## 5. OCP health check after deploy
+
+After deployment, run one analysis and verify:
+
+- No red banner saying OCP/OpenCASCADE is unavailable.
+- Turning score is not fixed at 45/100 for all models.
+- Geometry tab changes axis cues and dimensions per file.
+
+If OCP is still unavailable:
+
+1. Clear cache + reboot app in Streamlit settings.
+2. Confirm `runtime.txt` is exactly `python-3.12`.
+3. Confirm `requirements.txt` and `packages.txt` are from latest commit.

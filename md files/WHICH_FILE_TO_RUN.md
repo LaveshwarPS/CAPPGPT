@@ -34,7 +34,7 @@ That's it! The GUI will open automatically. ✨
 **How to use:** 
 ```bash
 cd "c:\Users\Adm\Desktop\CAPP-AI project"
-.\.venv\Scripts\Activate.ps1
+.\venv312\Scripts\Activate.ps1
 python capp_app.py
 ```
 **Features:**
@@ -54,7 +54,7 @@ python capp_app.py
 **How to use:**
 ```bash
 cd "c:\Users\Adm\Desktop\CAPP-AI project"
-.\.venv\Scripts\Activate.ps1
+.\venv312\Scripts\Activate.ps1
 python step_analyzer.py
 ```
 **Features:**
@@ -157,7 +157,7 @@ python batch_optimizer.py --model llama2
 ### Workflow 2: Terminal User
 ```bash
 cd "c:\Users\Adm\Desktop\CAPP-AI project"
-.\.venv\Scripts\Activate.ps1
+.\venv312\Scripts\Activate.ps1
 python step_analyzer.py
 # Select file from menu
 # Results display automatically
@@ -190,7 +190,7 @@ python step_analyzer.py model.step --ai-analysis
 
 ```powershell
 cd "c:\Users\Adm\Desktop\CAPP-AI project"
-.\.venv\Scripts\Activate.ps1
+.\venv312\Scripts\Activate.ps1
 ```
 
 The prompt will change to:
@@ -215,7 +215,7 @@ Then run your file.
 ```powershell
 1. Open PowerShell
 2. cd "c:\Users\Adm\Desktop\CAPP-AI project"
-3. .\.venv\Scripts\Activate.ps1
+3. .\venv312\Scripts\Activate.ps1
 4. python capp_app.py
 ```
 
@@ -247,7 +247,7 @@ Then run your file.
 ### "Python not found"
 **Solution:**
 ```powershell
-.\.venv\Scripts\Activate.ps1
+.\venv312\Scripts\Activate.ps1
 python step_analyzer.py
 ```
 
@@ -355,3 +355,4 @@ python batch_optimizer.py --ai
 ---
 
 **🎯 TL;DR: Double-click `launch_capp.bat` and start analyzing! 🚀**
+

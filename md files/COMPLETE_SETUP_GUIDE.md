@@ -22,7 +22,7 @@ You now have a complete **Computer-Aided Process Planning (CAPP) System** for tu
 ### Alternative: PowerShell
 ```powershell
 cd "C:\Users\Adm\Desktop\CAPP-AI project"
-.\.venv\Scripts\Activate.ps1
+.\venv312\Scripts\Activate.ps1
 python capp_app.py
 ```
 
@@ -124,27 +124,27 @@ Op | Name              | Type      | Tool           | Speed | Feed  | DOC  | Tim
 
 ### Launch GUI
 ```powershell
-.\.venv\Scripts\Activate.ps1; python capp_app.py
+.\venv312\Scripts\Activate.ps1; python capp_app.py
 ```
 
 ### Launch Terminal Browser
 ```powershell
-.\.venv\Scripts\Activate.ps1; python browser.py
+.\venv312\Scripts\Activate.ps1; python browser.py
 ```
 
 ### Batch Process All Files
 ```powershell
-.\.venv\Scripts\Activate.ps1; python batch_optimizer.py
+.\venv312\Scripts\Activate.ps1; python batch_optimizer.py
 ```
 
 ### Batch Process with AI
 ```powershell
-.\.venv\Scripts\Activate.ps1; python batch_optimizer.py --output results_with_ai.json
+.\venv312\Scripts\Activate.ps1; python batch_optimizer.py --output results_with_ai.json
 ```
 
 ### Analyze Single File (CLI)
 ```powershell
-.\.venv\Scripts\Activate.ps1; python step_analyzer.py "path\to\file.step" --capp-turning --ai
+.\venv312\Scripts\Activate.ps1; python step_analyzer.py "path\to\file.step" --capp-turning --ai
 ```
 
 ---
@@ -173,7 +173,7 @@ Op | Name              | Type      | Tool           | Speed | Feed  | DOC  | Tim
 ## 🔧 System Information
 
 - **Python**: 3.13.1
-- **Virtual Environment**: `.venv` (auto-created)
+- **Virtual Environment**: `venv312` (Python 3.12, required for OCP)
 - **OCP Library**: cadquery-ocp 7.8.1.1
 - **Ollama Model**: phi (for AI)
 - **GUI Framework**: tkinter (built-in)
@@ -234,7 +234,7 @@ Op | Name              | Type      | Tool           | Speed | Feed  | DOC  | Tim
 python --version
 
 # Activate environment manually
-.\.venv\Scripts\Activate.ps1
+.\venv312\Scripts\Activate.ps1
 
 # Run directly
 python capp_app.py
@@ -338,3 +338,4 @@ Everything is configured and ready to use:
 **Start with:** `launch_capp.bat` (easiest!)
 
 **Enjoy your CAPP system!** 🚀
+

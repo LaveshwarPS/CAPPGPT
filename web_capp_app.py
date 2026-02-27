@@ -41,11 +41,51 @@ def _init_state() -> None:
         st.session_state.chat_history = []
 
 
-def _save_uploaded_step(uploaded_file) -> str:
-    suffix = Path(uploaded_file.name).suffix or ".step"
+@st.cache_data(show_spinner=False)
+def _ocp_available() -> bool:
+    try:
+        import OCP  # type: ignore
+        return True
+    except Exception:
+        return False
+
+
+@st.cache_data(show_spinner=False, max_entries=24)
+def _generate_turning_plan_cached(
+    file_bytes: bytes,
+    file_name: str,
+    model: str,
+    with_ai: bool,
+    save_json: bool,
+    allow_demo_mode: bool,
+    material_profile: str,
+    machine_profile: str,
+    tolerance_mm: float,
+    surface_roughness_ra: float,
+) -> Dict:
+    """Cache heavy STEP analysis for repeated runs with identical inputs."""
+    suffix = Path(file_name).suffix or ".step"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getvalue())
-        return tmp.name
+        tmp.write(file_bytes)
+        temp_path = tmp.name
+
+    try:
+        return generate_turning_plan(
+            temp_path,
+            model=model,
+            with_ai=with_ai,
+            save_json=save_json,
+            allow_demo_mode=allow_demo_mode,
+            material_profile=material_profile,
+            machine_profile=machine_profile,
+            tolerance_mm=tolerance_mm,
+            surface_roughness_ra=surface_roughness_ra,
+        )
+    finally:
+        try:
+            Path(temp_path).unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _detect_step_protocol_from_bytes(file_bytes: bytes) -> Dict[str, str]:
@@ -74,6 +114,8 @@ def _detect_step_protocol_from_bytes(file_bytes: bytes) -> Dict[str, str]:
 def _summary_text(result: Dict, selected_name: str) -> str:
     operations = result.get("operations", [])
     tools = result.get("tools", [])
+    dims = result.get("dimensions", {}) or {}
+    scope = str(result.get("turning_scope", "none")).upper()
     total_time = sum(op.get("estimated_time", 0) for op in operations)
     return (
         "TURNING PROCESS PLAN SUMMARY\n\n"
@@ -86,7 +128,11 @@ def _summary_text(result: Dict, selected_name: str) -> str:
         f"Tolerance target: {result.get('tolerance_mm') if result.get('tolerance_mm') is not None else 'Not specified'} mm\n"
         f"Surface target: {result.get('surface_roughness_ra') if result.get('surface_roughness_ra') is not None else 'Not specified'} um Ra\n\n"
         f"Turning score: {result.get('turning_score', 'N/A')}/100\n"
-        f"Suitable for turning: {'YES' if result.get('success') else 'NO'}\n\n"
+        f"Turning scope: {scope}\n"
+        f"Suitable for turning: {'YES' if scope in {'FULL', 'PARTIAL'} else 'NO'}\n\n"
+        f"Diameter (est): {dims.get('diameter', 'N/A')} mm\n"
+        f"Length (est): {dims.get('length', 'N/A')} mm\n"
+        f"Envelope (X x Y x Z): {dims.get('x_size', 'N/A')} x {dims.get('y_size', 'N/A')} x {dims.get('z_size', 'N/A')} mm\n\n"
         f"Operations: {len(operations)}\n"
         f"Tools: {len(tools)}\n"
         f"Total machining time: {total_time:.1f} min\n"
@@ -235,6 +281,55 @@ def _render_validation_dialog(result: Dict) -> None:
             _render_content()
 
 
+def _render_geometry_tab(result: Dict) -> None:
+    dims = result.get("dimensions", {}) or {}
+    axis = result.get("axis_analysis", {}) or {}
+    checks = (result.get("strict_checks") or {})
+    model_info = result.get("model_info", {}) or {}
+    surface_types = model_info.get("surface_types", {}) or {}
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Envelope X", f"{dims.get('x_size', 0):.2f} mm" if isinstance(dims.get("x_size"), (int, float)) else "N/A")
+    c2.metric("Envelope Y", f"{dims.get('y_size', 0):.2f} mm" if isinstance(dims.get("y_size"), (int, float)) else "N/A")
+    c3.metric("Envelope Z", f"{dims.get('z_size', 0):.2f} mm" if isinstance(dims.get("z_size"), (int, float)) else "N/A")
+    c4.metric("Volume", f"{dims.get('volume', 0):.0f} mm^3" if isinstance(dims.get("volume"), (int, float)) else "N/A")
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Turning Diameter (est)", f"{dims.get('diameter', 0):.2f} mm" if isinstance(dims.get("diameter"), (int, float)) else "N/A")
+    d2.metric("Turning Length (est)", f"{dims.get('length', 0):.2f} mm" if isinstance(dims.get("length"), (int, float)) else "N/A")
+    d3.metric("Rotational Evidence", result.get("rotational_evidence_ratio", "N/A"))
+
+    st.subheader("Axis Diagnostics")
+    if axis:
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Axis X", axis.get("axis_x", "N/A"))
+        a2.metric("Axis Y", axis.get("axis_y", "N/A"))
+        a3.metric("Axis Z", axis.get("axis_z", "N/A"))
+        a4.metric("Axis Cues", result.get("axis_cue_count", "N/A"))
+
+        st.write(
+            f"Alignment @8deg: {axis.get('aligned_ratio_8deg', 'n/a')} | "
+            f"Alignment @15deg: {axis.get('aligned_ratio_15deg', 'n/a')} | "
+            f"Mean misalignment: {axis.get('mean_misalignment_deg', 'n/a')} deg"
+        )
+    else:
+        st.info("No axis diagnostics available for this analysis.")
+
+    st.subheader("Turning Gate Checks")
+    if checks:
+        rows = [{"Check": k, "Pass": bool(v)} for k, v in checks.items()]
+        st.dataframe(rows, hide_index=True, use_container_width=True)
+    else:
+        st.info("Strict gate check details are not available.")
+
+    st.subheader("Surface Mix")
+    if surface_types:
+        rows = [{"Surface Type": k, "Count": int(v)} for k, v in surface_types.items()]
+        st.dataframe(rows, hide_index=True, use_container_width=True)
+    else:
+        st.info("Surface type breakdown is not available.")
+
+
 def main() -> None:
     # Keep web app provider fixed to Gemini.
     set_provider("gemini")
@@ -246,6 +341,14 @@ def main() -> None:
     )
     _init_state()
     st.markdown("### CAPPGPT")
+    if not _ocp_available():
+        st.error(
+            "OpenCASCADE/OCP is not available in this runtime. Real STEP geometry analysis is disabled."
+        )
+        st.caption(
+            "Install cadquery-ocp and pin Streamlit runtime to Python 3.12. "
+            "Without OCP, turning score/limits may fall back to mock/demo behavior."
+        )
     st.markdown(
         """
         <style>
@@ -264,10 +367,12 @@ def main() -> None:
     with st.sidebar:
         st.header("File & Options")
         uploaded = st.file_uploader("Select STEP file", type=["step", "stp"])
+        uploaded_bytes = None
         uploaded_step_info = None
         continue_with_legacy = True
         if uploaded is not None:
-            uploaded_step_info = _detect_step_protocol_from_bytes(uploaded.getvalue())
+            uploaded_bytes = uploaded.getvalue()
+            uploaded_step_info = _detect_step_protocol_from_bytes(uploaded_bytes)
             st.caption(
                 f"STEP schema: {uploaded_step_info.get('protocol', 'Unknown')} "
                 f"({uploaded_step_info.get('schema', 'Unknown')})"
@@ -319,13 +424,14 @@ def main() -> None:
             st.error("Please confirm continue for AP203/AP214, or upload an AP242 STEP file.")
         else:
             st.session_state.uploaded_name = uploaded.name
-            temp_path = _save_uploaded_step(uploaded)
             with st.spinner("Analyzing STEP file and generating process plan..."):
-                result = generate_turning_plan(
-                    temp_path,
+                result = _generate_turning_plan_cached(
+                    uploaded_bytes or uploaded.getvalue(),
+                    uploaded.name,
                     model=model,
                     with_ai=with_ai,
                     save_json=save_json,
+                    allow_demo_mode=False,
                     material_profile=material_profile,
                     machine_profile=machine_profile,
                     tolerance_mm=tolerance_mm,
@@ -334,11 +440,19 @@ def main() -> None:
             st.session_state.analysis_result = result
             st.session_state.chat_history = []
             if result.get("success"):
+                if result.get("demo_mode"):
+                    st.error(
+                        "Analysis completed in DEMO mode (mock geometry). Install/enable OCP for real turning scores."
+                    )
                 st.success(f"Completed: {uploaded.name}")
                 if result.get("turning_scope") == "partial":
                     st.warning("Generated limited CAPP: only turnable portion included.")
             else:
                 st.error(result.get("error", "Analysis failed"))
+                if result.get("demo_mode"):
+                    st.info(
+                        "Root cause: OCP (cadquery-ocp) is unavailable in this runtime, so real STEP geometry was not analyzed."
+                    )
                 recommended = result.get("recommended_process")
                 alternatives = result.get("alternative_processes", [])
                 gate_reasons = result.get("turning_gate_reasons", [])
@@ -355,8 +469,8 @@ def main() -> None:
     result = st.session_state.analysis_result
     selected_name = st.session_state.uploaded_name or "N/A"
 
-    tab_ops, tab_tools, tab_summary, tab_ai, tab_limits, tab_chat = st.tabs(
-        ["Operations", "Tools", "Summary", "AI Recommendations", "Turning Limits", "Chat with AI"]
+    tab_ops, tab_tools, tab_summary, tab_geometry, tab_ai, tab_limits, tab_chat = st.tabs(
+        ["Operations", "Tools", "Summary", "Geometry", "AI Recommendations", "Turning Limits", "Chat with AI"]
     )
 
     with tab_ops:
@@ -394,6 +508,23 @@ def main() -> None:
 
     with tab_summary:
         if result:
+            dims = result.get("dimensions", {}) or {}
+            axis = result.get("axis_analysis", {}) or {}
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Turning Score", f"{result.get('turning_score', 'N/A')}/100")
+            c2.metric("Diameter (est)", f"{dims.get('diameter', 'N/A'):.2f} mm" if isinstance(dims.get("diameter"), (int, float)) else "N/A")
+            c3.metric("Length (est)", f"{dims.get('length', 'N/A'):.2f} mm" if isinstance(dims.get("length"), (int, float)) else "N/A")
+            c4.metric("Axis Cues", result.get("axis_cue_count", "N/A"))
+
+            if axis:
+                st.caption(
+                    "Axis fit: "
+                    f"({axis.get('axis_x', 0)}, {axis.get('axis_y', 0)}, {axis.get('axis_z', 1)}) | "
+                    f"align@8°={axis.get('aligned_ratio_8deg', 'n/a')} | "
+                    f"align@15°={axis.get('aligned_ratio_15deg', 'n/a')} | "
+                    f"rotational evidence={result.get('rotational_evidence_ratio', 'n/a')}"
+                )
+
             text = _summary_text(result, selected_name)
             st.text_area("Summary", value=text, height=260)
             if result.get("json_file") and Path(result["json_file"]).exists():
@@ -424,6 +555,12 @@ def main() -> None:
             st.markdown(ai_text)
         else:
             st.info("Run analysis to get AI recommendations.")
+
+    with tab_geometry:
+        if result:
+            _render_geometry_tab(result)
+        else:
+            st.info("Run analysis to inspect geometry diagnostics.")
 
     with tab_limits:
         if result:
