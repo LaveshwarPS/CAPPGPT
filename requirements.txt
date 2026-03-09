@@ -22,7 +22,6 @@ pathlib2>=2.3.0; python_version < "3.4"
 
 # Web UI
 streamlit>=1.37.0
-pyinstaller>=6.6.0
 
 # Optional: For enhanced error reporting and debugging
 # traceback is built-in to Python
