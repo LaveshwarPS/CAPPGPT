@@ -334,18 +334,34 @@ class TurningProcessPlan:
         torus = int(surface.get("Torus", 0))
         plane = int(surface.get("Plane", 0))
         slenderness = dimensions["length"] / max(dimensions["diameter"], 0.1)
+        cone_to_cyl_ratio = cone / max(cyl, 1)
+
+        drill_like = bool(
+            slenderness >= 4.0
+            and cyl >= 4
+            and cone >= 2
+            and cone_to_cyl_ratio >= 0.2
+            and torus <= 1
+            and plane <= 4
+        )
 
         threading_reasons: List[str] = []
         threading_score = 0
-        if cone > 0 and cyl >= 2:
+        if cone > 0 and cyl >= 3 and plane >= 3:
             threading_score += 2
-            threading_reasons.append("Cone + multiple cylinder surfaces indicate thread lead-in profile.")
-        if edge_face_ratio >= 2.8 and cyl >= 3:
+            threading_reasons.append("Cone + cylinder + shoulder transitions indicate possible thread lead-in.")
+        if edge_face_ratio >= 3.2 and cyl >= 4 and plane >= 3:
             threading_score += 1
-            threading_reasons.append("High edge density on cylindrical geometry suggests helical detail.")
-        if slenderness >= 1.2:
+            threading_reasons.append("High edge density with shoulder features suggests helical detail.")
+        if 0.8 <= slenderness <= 6.0:
             threading_score += 1
-            threading_reasons.append("Length/diameter ratio supports external threading access.")
+            threading_reasons.append("Length/diameter ratio is typical for thread-turning access.")
+        if torus > 0:
+            threading_score += 1
+            threading_reasons.append("Relief-like toroidal transitions support thread termination geometry.")
+        if drill_like:
+            threading_score = 0
+            threading_reasons = ["Drill-like profile detected; suppressing external threading false positive."]
 
         grooving_reasons: List[str] = []
         grooving_score = 0
@@ -358,6 +374,21 @@ class TurningProcessPlan:
         if self.analysis.get("cylindrical_faces", 0) >= 5:
             grooving_score += 1
             grooving_reasons.append("High cylindrical face count indicates stepped OD/ID features.")
+
+        boring_reasons: List[str] = []
+        boring_score = 0
+        if cyl >= 8 and plane >= 8 and slenderness <= 3.5:
+            boring_score += 1
+            boring_reasons.append("High cylinder-plane transitions suggest stepped internal/external turning features.")
+        if torus >= 2:
+            boring_score += 1
+            boring_reasons.append("Multiple toroidal transitions can indicate internal reliefs/chamfers.")
+        if edge_face_ratio >= 3.5 and plane >= 6:
+            boring_score += 1
+            boring_reasons.append("Dense edge network with planar transitions suggests internal feature complexity.")
+        if drill_like:
+            boring_score = 0
+            boring_reasons = ["Drill-like profile detected; suppressing internal boring false positive."]
 
         def _feature_result(score: int, reasons: List[str], label: str) -> Dict:
             if score >= 3:
@@ -374,12 +405,15 @@ class TurningProcessPlan:
         return {
             "threading": _feature_result(threading_score, threading_reasons, "threading"),
             "grooving": _feature_result(grooving_score, grooving_reasons, "grooving"),
+            "boring": _feature_result(boring_score, boring_reasons, "boring"),
             "metrics": {
                 "edge_face_ratio": round(edge_face_ratio, 2),
                 "cylinder_surfaces": cyl,
                 "cone_surfaces": cone,
                 "torus_surfaces": torus,
                 "slenderness_ratio": round(slenderness, 2),
+                "cone_to_cylinder_ratio": round(cone_to_cyl_ratio, 2),
+                "drill_like": drill_like,
             },
         }
 
@@ -504,8 +538,7 @@ class TurningProcessPlan:
                 "thread_spec": "M10 x 1.5 (example)",
             })
 
-        cylindrical_faces = self.analysis.get("cylindrical_faces", 0)
-        if cylindrical_faces > 2:
+        if features.get("boring", {}).get("detected"):
             add_operation({
                 "name": "Boring",
                 "description": "Machine internal cylindrical features",
@@ -627,8 +660,10 @@ class TurningProcessPlan:
 
         threading_detected = bool(self.feature_detection.get("threading", {}).get("detected"))
         grooving_detected = bool(self.feature_detection.get("grooving", {}).get("detected"))
+        boring_detected = bool(self.feature_detection.get("boring", {}).get("detected"))
         has_threading_op = any(op.get("type") == "threading" for op in self.operations)
         has_grooving_op = any(op.get("type") == "grooving" for op in self.operations)
+        has_boring_op = any(op.get("type") == "boring" for op in self.operations)
         has_fine_finish = any(op.get("type") == "finishing" for op in self.operations)
         op_index = {op.get("name"): idx for idx, op in enumerate(self.operations)}
 
@@ -656,6 +691,19 @@ class TurningProcessPlan:
                 "level": "fail",
                 "title": "Grooving Rule",
                 "detail": "Grooving operation mismatch against geometry detector.",
+            })
+
+        if has_boring_op == boring_detected:
+            messages.append({
+                "level": "pass",
+                "title": "Boring Rule",
+                "detail": f"Boring op {'added' if has_boring_op else 'skipped'} based on geometry detection.",
+            })
+        else:
+            messages.append({
+                "level": "fail",
+                "title": "Boring Rule",
+                "detail": "Boring operation mismatch against geometry detector.",
             })
 
         finish_needed = self._needs_finish_pass()
@@ -837,6 +885,8 @@ class TurningProcessPlan:
         filtered: List[Dict] = []
         for tool in tools:
             name = tool["name"]
+            if name == "Boring Insert" and "boring" not in op_types:
+                continue
             if name == "Threading Insert" and "threading" not in op_types:
                 continue
             if name == "Grooving Insert" and "grooving" not in op_types:
