@@ -177,6 +177,7 @@ def _make_file_signature(step_file: str) -> str:
 
 def _build_plan_cache_key(
     step_file: str,
+    source_file_name: Optional[str],
     model: str,
     with_ai: bool,
     save_json: bool,
@@ -188,6 +189,7 @@ def _build_plan_cache_key(
 ) -> str:
     payload = {
         "file": _make_file_signature(step_file),
+        "source_file_name": str(source_file_name or ""),
         "model": model,
         "with_ai": bool(with_ai),
         "save_json": bool(save_json),
@@ -1431,6 +1433,7 @@ Suggest optimizations for:
 
 def generate_turning_plan(
     step_file: str,
+    source_file_name: Optional[str] = None,
     model: str = "phi",
     with_ai: bool = True,
     save_json: bool = False,
@@ -1458,6 +1461,7 @@ def generate_turning_plan(
     """
     cache_key = _build_plan_cache_key(
         step_file=step_file,
+        source_file_name=source_file_name,
         model=model,
         with_ai=with_ai,
         save_json=save_json,
@@ -1477,6 +1481,13 @@ def generate_turning_plan(
     # Analyze the STEP file.
     print("  Running geometry analysis...")
     analysis = analyze_step_file(step_file, allow_demo_mode=allow_demo_mode)
+    # Preserve the original uploaded file name (Streamlit uploads use temporary paths).
+    if source_file_name:
+        model_info = analysis.get("model_info", {}) or {}
+        file_info = model_info.get("file_info", {}) or {}
+        file_info["filename"] = Path(source_file_name).name
+        model_info["file_info"] = file_info
+        analysis["model_info"] = model_info
 
     if not analysis.get("success"):
         print(f"  Analysis failed: {analysis.get('error')}")

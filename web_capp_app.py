@@ -72,6 +72,7 @@ def _generate_turning_plan_cached(
     try:
         return generate_turning_plan(
             temp_path,
+            source_file_name=file_name,
             model=model,
             with_ai=with_ai,
             save_json=save_json,
