@@ -238,6 +238,9 @@ class TurningProcessPlan:
         self.machine_profile = machine_profile
         self.tolerance_mm = tolerance_mm
         self.surface_roughness_ra = surface_roughness_ra
+        step_protocol = str(self.analysis.get("step_protocol") or self.analysis.get("model_info", {}).get("header_data", {}).get("step_protocol", "Unknown"))
+        legacy_step = str(self.analysis.get("legacy_step") or self.analysis.get("model_info", {}).get("header_data", {}).get("legacy_step", "unknown")).lower()
+        self.is_legacy_step = bool(step_protocol.upper() in {"AP203", "AP214"} or legacy_step == "yes")
         turning_data = self.analysis.get("machinability", {}).get("turning", {})
         self.turning_score = self._get_turning_score()
         self.strict_turnable = bool(turning_data.get("strict_turnable", self.turning_score >= 75))
@@ -247,8 +250,10 @@ class TurningProcessPlan:
         # Partial turning should be easier to pass: keep strict mode for "full turning",
         # but allow CAPP on clearly rotational subsets of mixed-geometry models.
         if strict_checks:
+            partial_score_min = 52 if self.is_legacy_step else 55
+            partial_axis_ratio_min = 0.68 if self.is_legacy_step else 0.72
             self.partial_turnable = bool(
-                self.turning_score >= 55
+                self.turning_score >= partial_score_min
                 and strict_checks.get("cylindrical_dominance", False)
                 and strict_checks.get("circular_edge_support", False)
                 and strict_checks.get("limited_complexity", False)
@@ -256,7 +261,7 @@ class TurningProcessPlan:
                 and (
                     strict_checks.get("axisymmetric_xy", False)
                     or strict_checks.get("turnable_majority", False)
-                    or axis_relaxed_ratio >= 0.72
+                    or axis_relaxed_ratio >= partial_axis_ratio_min
                 )
             )
         else:
@@ -537,11 +542,11 @@ class TurningProcessPlan:
         if feature_name == "threading":
             # Threading false positives are common when there is no lead-in/relief cue.
             hard_cue = int(metrics.get("cone_surfaces", 0)) > 0 or int(metrics.get("torus_surfaces", 0)) > 0
-            min_rank = 2 if self.strict_turnable else 3
+            min_rank = 2 if (self.strict_turnable or self.is_legacy_step) else 3
             return bool(hard_cue and confidence_rank >= min_rank)
 
         if feature_name == "grooving":
-            min_rank = 2 if self.strict_turnable else 3
+            min_rank = 2 if (self.strict_turnable or self.is_legacy_step) else 3
             return confidence_rank >= min_rank
 
         if feature_name == "boring":
@@ -554,14 +559,16 @@ class TurningProcessPlan:
             edge_ratio = float(metrics.get("edge_face_ratio", 0.0) or 0.0)
             if self.strict_turnable:
                 return bool(confidence_rank >= 2 and (cyl >= 6 or plane >= 6 or edge_ratio >= 2.6))
-            return bool(confidence_rank >= 2 and (cyl >= 8 or edge_ratio >= 3.0))
+            edge_gate = 2.8 if self.is_legacy_step else 3.0
+            cyl_gate = 7 if self.is_legacy_step else 8
+            return bool(confidence_rank >= 2 and (cyl >= cyl_gate or edge_ratio >= edge_gate))
 
         if feature_name == "taper_turning":
-            min_rank = 2 if self.strict_turnable else 3
+            min_rank = 2 if (self.strict_turnable or self.is_legacy_step) else 3
             return confidence_rank >= min_rank
 
         if feature_name == "undercut":
-            min_rank = 2 if self.strict_turnable else 3
+            min_rank = 2 if (self.strict_turnable or self.is_legacy_step) else 3
             return confidence_rank >= min_rank
 
         if feature_name == "drilling":
@@ -574,7 +581,9 @@ class TurningProcessPlan:
                 return True
             if confidence_rank >= 2:
                 return True
-            return bool(cyl >= 8 and slenderness >= 2.2 and edge_ratio >= 2.4)
+            cyl_gate = 7 if self.is_legacy_step else 8
+            edge_gate = 2.2 if self.is_legacy_step else 2.4
+            return bool(cyl >= cyl_gate and slenderness >= 2.2 and edge_ratio >= edge_gate)
 
         if feature_name == "chamfering":
             # Chamfer/deburr is a finishing-stage operation.

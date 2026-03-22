@@ -432,7 +432,7 @@ def _extract_circular_edge_axes(shape, TopoDS, BRep_Tool, GeomAdaptor_Curve) -> 
 
 
 def _compute_best_fit_axis(rot_axes: List[Tuple[float, float, float]]) -> Dict[str, float]:
-    """Compute best-fit axis and aligned ratio from rotational face axes."""
+    """Compute robust dominant axis and alignment ratios from rotational cues."""
     if not rot_axes:
         return {
             "available": False,
@@ -442,26 +442,52 @@ def _compute_best_fit_axis(rot_axes: List[Tuple[float, float, float]]) -> Dict[s
             "aligned_ratio_8deg": 0.0,
             "aligned_ratio_15deg": 0.0,
             "mean_misalignment_deg": 90.0,
+            "dominant_support_ratio": 0.0,
         }
-
-    seed = rot_axes[0]
-    accum = [seed[0], seed[1], seed[2]]
-    for axis in rot_axes[1:]:
-        sign = 1.0 if _dot(seed, axis) >= 0 else -1.0
-        accum[0] += axis[0] * sign
-        accum[1] += axis[1] * sign
-        accum[2] += axis[2] * sign
-
-    best = _normalize_vector((accum[0], accum[1], accum[2]))
-    if best is None:
-        best = seed
 
     cos_8 = math.cos(math.radians(8.0))
     cos_15 = math.cos(math.radians(15.0))
+    count = len(rot_axes)
+    best = rot_axes[0]
+    best_key: Tuple[int, int, float] = (-1, -1, 10**9)
+
+    # Evaluate each observed axis as a cluster seed and pick the densest consensus.
+    for seed in rot_axes:
+        aligned_15 = 0
+        aligned_8 = 0
+        angle_sum = 0.0
+        for axis in rot_axes:
+            cos_angle = min(1.0, max(0.0, abs(_dot(seed, axis))))
+            if cos_angle >= cos_15:
+                aligned_15 += 1
+            if cos_angle >= cos_8:
+                aligned_8 += 1
+            angle_sum += math.degrees(math.acos(cos_angle))
+        mean_angle = angle_sum / count
+        key = (aligned_15, aligned_8, -mean_angle)
+        if key > best_key:
+            best_key = key
+            best = seed
+
+    # Refine best axis by averaging vectors aligned to the selected seed.
+    accum = [0.0, 0.0, 0.0]
+    support_count = 0
+    for axis in rot_axes:
+        cos_angle = min(1.0, max(0.0, abs(_dot(best, axis))))
+        if cos_angle >= cos_15:
+            sign = 1.0 if _dot(best, axis) >= 0 else -1.0
+            accum[0] += axis[0] * sign
+            accum[1] += axis[1] * sign
+            accum[2] += axis[2] * sign
+            support_count += 1
+
+    refined = _normalize_vector((accum[0], accum[1], accum[2]))
+    if refined is not None:
+        best = refined
+
     aligned_8 = 0
     aligned_15 = 0
     misalignment: List[float] = []
-
     for axis in rot_axes:
         cos_angle = min(1.0, max(0.0, abs(_dot(best, axis))))
         if cos_angle >= cos_8:
@@ -470,7 +496,6 @@ def _compute_best_fit_axis(rot_axes: List[Tuple[float, float, float]]) -> Dict[s
             aligned_15 += 1
         misalignment.append(math.degrees(math.acos(cos_angle)))
 
-    count = len(rot_axes)
     return {
         "available": True,
         "axis_x": round(best[0], 4),
@@ -479,10 +504,17 @@ def _compute_best_fit_axis(rot_axes: List[Tuple[float, float, float]]) -> Dict[s
         "aligned_ratio_8deg": aligned_8 / count,
         "aligned_ratio_15deg": aligned_15 / count,
         "mean_misalignment_deg": round(sum(misalignment) / count, 2),
+        "dominant_support_ratio": round(support_count / count, 3) if count else 0.0,
     }
 
 
-def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, int]] = None):
+def analyze_machinability(
+    shape,
+    ocp_modules,
+    surface_types: Optional[Dict[str, int]] = None,
+    step_protocol: str = "Unknown",
+    legacy_step: str = "unknown",
+):
     """
     Analyze the machinability of a 3D model for different manufacturing processes.
     
@@ -623,6 +655,9 @@ def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, 
     
     # Analyze machinability for different processes
     machinability = {}
+    protocol_upper = str(step_protocol or "Unknown").upper()
+    legacy_flag = str(legacy_step or "unknown").lower()
+    is_legacy_step = bool(protocol_upper in {"AP203", "AP214"} or legacy_flag == "yes")
     
     # 3-Axis Milling
     milling_score = 0
@@ -676,14 +711,23 @@ def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, 
     x_size = max(dimensions["x_size"], 0.001)
     y_size = max(dimensions["y_size"], 0.001)
     z_size = max(dimensions["z_size"], 0.001)
-    radial_size = max(x_size, y_size)
-    xy_delta_ratio = abs(x_size - y_size) / radial_size
-    aspect_ratio = z_size / radial_size
+    size_sorted = sorted([x_size, y_size, z_size])
+    radial_mean = max((size_sorted[0] + size_sorted[1]) * 0.5, 0.001)
+    radial_pair_delta = abs(size_sorted[0] - size_sorted[1]) / max(size_sorted[1], 0.001)
+    aspect_ratio = size_sorted[2] / radial_mean
+    envelope_axisymmetric_strict = radial_pair_delta <= 0.14
+    envelope_axisymmetric_relaxed = radial_pair_delta <= 0.24
 
     complexity_ratio = complex_surfaces / total_surfaces
     rotational_axes = _extract_rotational_axes(shape, TopoDS, BRep_Tool, GeomAdaptor_Surface)
     circular_axes = _extract_circular_edge_axes(shape, TopoDS, BRep_Tool, GeomAdaptor_Curve)
-    axis_sources = rotational_axes + circular_axes
+    # Cylindrical/conical surface axes are higher quality than circular-edge cues.
+    # Keep edge evidence bounded so it cannot drown out a valid dominant lathe axis.
+    if rotational_axes:
+        max_edge_axes = max(24, int(len(rotational_axes) * 1.5))
+        axis_sources = rotational_axes + circular_axes[:max_edge_axes]
+    else:
+        axis_sources = circular_axes
     axis_fit = _compute_best_fit_axis(axis_sources)
     rotational_face_count = surface_types["Cylinder"] + surface_types["Cone"]
     rotational_face_ratio = rotational_face_count / total_surfaces
@@ -694,15 +738,61 @@ def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, 
     # - 8 deg: strict alignment for full turning
     # - 15 deg: relaxed alignment for partial turning recommendation
     # - 35% non-rotational surface allowance for "turnable majority" models
-    axisymmetric_bestfit = bool(axis_fit["available"] and axis_fit["aligned_ratio_8deg"] >= 0.60)
-    axisymmetric_relaxed = bool(axis_fit["available"] and axis_fit["aligned_ratio_15deg"] >= 0.72)
+    strict_axis_threshold = 0.60
+    relaxed_axis_threshold = 0.72
+    strict_support_threshold = 0.68
+    relaxed_support_threshold = 0.55
+    if is_legacy_step:
+        # AP203/AP214 exports often split analytic continuity and weaken axis cues.
+        strict_axis_threshold -= 0.03
+        relaxed_axis_threshold -= 0.04
+        strict_support_threshold -= 0.05
+        relaxed_support_threshold -= 0.04
+    if len(axis_sources) >= 120:
+        # Large cue sets often include noisy edge-derived axes; allow slightly lower ratios.
+        strict_axis_threshold = 0.54
+        relaxed_axis_threshold = 0.66
+    elif len(axis_sources) >= 60:
+        strict_axis_threshold = 0.57
+        relaxed_axis_threshold = 0.69
+
+    dominant_support_ratio = float(axis_fit.get("dominant_support_ratio", 0.0) or 0.0)
+    envelope_axis_support = bool(
+        rotational_face_ratio >= (0.14 if is_legacy_step else 0.18)
+        or circular_edge_ratio >= (0.14 if is_legacy_step else 0.18)
+        or (rotational_face_ratio + circular_edge_ratio) >= (0.30 if is_legacy_step else 0.36)
+    )
+    axisymmetric_bestfit = bool(
+        (
+            axis_fit["available"]
+            and axis_fit["aligned_ratio_8deg"] >= strict_axis_threshold
+            and dominant_support_ratio >= strict_support_threshold
+        )
+        or (
+            not axis_fit["available"]
+            and envelope_axisymmetric_strict
+            and envelope_axis_support
+        )
+    )
+    axisymmetric_relaxed = bool(
+        (
+            axis_fit["available"]
+            and axis_fit["aligned_ratio_15deg"] >= relaxed_axis_threshold
+            and dominant_support_ratio >= relaxed_support_threshold
+        )
+        or (
+            not axis_fit["available"]
+            and envelope_axisymmetric_relaxed
+            and envelope_axis_support
+        )
+    )
     rotational_evidence = rotational_face_ratio + circular_edge_ratio
     turnable_majority = bool(
         axisymmetric_relaxed
         and (
-            rotational_face_ratio >= 0.18
-            or circular_edge_ratio >= 0.18
-            or rotational_evidence >= 0.36
+            rotational_face_ratio >= (0.14 if is_legacy_step else 0.18)
+            or circular_edge_ratio >= (0.14 if is_legacy_step else 0.18)
+            or rotational_evidence >= (0.30 if is_legacy_step else 0.36)
         )
         and minor_non_rotational_ratio <= 0.85
     )
@@ -711,20 +801,31 @@ def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, 
         or minor_non_rotational_ratio <= 0.45
         or (
             axis_fit["available"]
-            and axis_fit["aligned_ratio_8deg"] >= 0.70
-            and circular_edge_ratio >= 0.20
+            and axis_fit["aligned_ratio_8deg"] >= (0.66 if is_legacy_step else 0.70)
+            and circular_edge_ratio >= (0.16 if is_legacy_step else 0.20)
         )
+    )
+    axis_consensus_pass = bool(
+        dominant_support_ratio >= 0.60
+        or (not axis_fit["available"] and envelope_axisymmetric_relaxed and envelope_axis_support)
     )
 
     strict_checks = {
         # Use best-fit rotational axis from geometry, not global XYZ assumptions.
         "axisymmetric_xy": axisymmetric_bestfit,
+        "axis_consensus": axis_consensus_pass,
         "turnable_majority": turnable_majority,
         "small_asymmetry_ok": small_asymmetry_ok,
         "cylindrical_dominance": (surface_types["Cylinder"] + surface_types["Cone"]) >= 4 or rotational_face_ratio >= 0.12,
-        "circular_edge_support": circular_edge_ratio >= 0.04 or edge_types["Circle"] >= 6,
+        "circular_edge_support": (
+            circular_edge_ratio >= (0.03 if is_legacy_step else 0.04)
+            or edge_types["Circle"] >= (4 if is_legacy_step else 6)
+        ),
         # Allow moderate freeform detail; block only when freeform dominates most of the part.
-        "limited_complexity": not (complex_surfaces > 40 and complexity_ratio > 0.75),
+        "limited_complexity": not (
+            complex_surfaces > (55 if is_legacy_step else 40)
+            and complexity_ratio > (0.80 if is_legacy_step else 0.75)
+        ),
         "reasonable_aspect_ratio": 0.2 <= aspect_ratio <= 12.0,
     }
 
@@ -794,23 +895,25 @@ def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, 
         turning_reasons.append(f"Aspect ratio {aspect_ratio:.2f}:1 is outside strict turning range.")
 
     # Keep envelope-based signal as a soft fallback only (for low-feature models).
-    if not axis_fit["available"] and xy_delta_ratio <= 0.25:
+    if not axis_fit["available"] and envelope_axisymmetric_relaxed:
         turning_score += 8
         turning_reasons.append(
-            f"Fallback envelope symmetry supports turning (X/Y delta ratio {xy_delta_ratio:.2f})."
+            f"Fallback envelope symmetry supports turning (radial-pair delta {radial_pair_delta:.2f})."
         )
 
     turning_score = max(0, min(100, turning_score + 16))
+    strict_turning_score_cutoff = 62 if is_legacy_step else 66
     # Primary gate: must satisfy rotational geometry checks and not be overwhelmingly freeform.
     strict_turnable = (
         strict_checks["axisymmetric_xy"]
+        and strict_checks["axis_consensus"]
         and strict_checks["turnable_majority"]
         and strict_checks["small_asymmetry_ok"]
         and strict_checks["cylindrical_dominance"]
         and strict_checks["circular_edge_support"]
         and strict_checks["reasonable_aspect_ratio"]
         and strict_checks["limited_complexity"]
-        and turning_score >= 66
+        and turning_score >= strict_turning_score_cutoff
     )
     if strict_turnable:
         turning_reasons.append("Strict turning gate passed: geometry qualifies for CAPP turning workflow.")
@@ -827,6 +930,9 @@ def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, 
         "axis_cue_count": len(axis_sources),
         "surface_axis_count": len(rotational_axes),
         "circular_edge_axis_count": len(circular_axes),
+        "legacy_threshold_relaxation": is_legacy_step,
+        "envelope_axisymmetric_relaxed": envelope_axisymmetric_relaxed,
+        "envelope_radial_pair_delta": round(radial_pair_delta, 3),
         "turnable_majority_ratio": round(rotational_face_ratio, 3),
         "rotational_evidence_ratio": round(rotational_evidence, 3),
         "minor_asymmetry_ratio": round(minor_non_rotational_ratio, 3),
@@ -869,6 +975,12 @@ def analyze_machinability(shape, ocp_modules, surface_types: Optional[Dict[str, 
         "3d_printing": machinability["3d_printing"]["score"]
     }
     recommended_process = max(scores, key=scores.get)
+    turning_data = machinability["turning"]
+    if recommended_process == "3_axis_milling":
+        if turning_data.get("strict_turnable") and scores["turning"] >= scores["3_axis_milling"] - 12:
+            recommended_process = "turning"
+        elif turning_data.get("strict_checks", {}).get("turnable_majority") and scores["turning"] >= 58:
+            recommended_process = "turning"
     sorted_processes = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
     alternative_processes = [name for name, _ in sorted_processes if name != "turning"][:2]
     
@@ -1102,6 +1214,8 @@ def analyze_step_file(file_path: str = None, allow_demo_mode: Optional[bool] = N
             shape,
             ocp_modules,
             surface_types=model_info.get("surface_types"),
+            step_protocol=model_info.get("header_data", {}).get("step_protocol", "Unknown"),
+            legacy_step=model_info.get("header_data", {}).get("legacy_step", "unknown"),
         )
         
         # Display results
