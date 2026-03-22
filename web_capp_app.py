@@ -195,44 +195,6 @@ def _operations_table_rows(result: Dict) -> List[Dict]:
     return rows
 
 
-def _operation_decision_rows(result: Dict) -> List[Dict]:
-    features = result.get("feature_detection", {}) or {}
-    op_types = {str(op.get("type", "")).strip().lower() for op in result.get("operations", [])}
-    profile = result.get("operation_profile", {}) or {}
-    legacy_step = str(result.get("legacy_step", "unknown")).lower()
-
-    feature_order = ["drilling", "boring", "taper_turning", "grooving", "undercut", "threading", "chamfering"]
-    rows: List[Dict] = []
-    for name in feature_order:
-        f = features.get(name, {}) or {}
-        reasons = f.get("reasons", []) or []
-        rows.append(
-            {
-                "Feature Op": name.replace("_", " ").title(),
-                "Detected": bool(f.get("detected", False)),
-                "Confidence": str(f.get("confidence", "low")).upper(),
-                "Included In Plan": bool(name in op_types),
-                "Top Reasons": " | ".join(str(r) for r in reasons[:2]),
-            }
-        )
-
-    rows.append(
-        {
-            "Feature Op": "Core Scope",
-            "Detected": True,
-            "Confidence": str(profile.get("scope", "unknown")).upper(),
-            "Included In Plan": True,
-            "Top Reasons": (
-                f"rough={bool(profile.get('include_rough', False))}, "
-                f"semi={bool(profile.get('include_semi_finish', False))}, "
-                f"parting={bool(profile.get('include_parting', False))}, "
-                f"legacy_step={legacy_step}"
-            ),
-        }
-    )
-    return rows
-
-
 def _tools_table_rows(result: Dict) -> List[Dict]:
     rows: List[Dict] = []
     for tool in result.get("tools", []):
@@ -527,16 +489,6 @@ def main() -> None:
                     "Thread": st.column_config.TextColumn(width="medium"),
                 },
             )
-            with st.expander("Operation Decision Matrix"):
-                st.dataframe(
-                    _operation_decision_rows(result),
-                    use_container_width=True,
-                    hide_index=True,
-                    column_config={
-                        "Top Reasons": st.column_config.TextColumn(width="large"),
-                        "Feature Op": st.column_config.TextColumn(width="medium"),
-                    },
-                )
         else:
             st.info("Run analysis to see operations.")
 
