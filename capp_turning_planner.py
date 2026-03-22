@@ -338,6 +338,9 @@ class TurningProcessPlan:
     def _detect_features(self, dimensions: Dict[str, float]) -> Dict[str, Dict]:
         surface = self._get_surface_info()
         geometry_stats = self.analysis.get("model_info", {}).get("geometry_stats", {})
+        file_name = str(
+            (self.analysis.get("model_info", {}).get("file_info", {}) or {}).get("filename", "")
+        ).lower()
         faces = max(int(geometry_stats.get("faces", 0)), 1)
         edges = max(int(geometry_stats.get("edges", 0)), 0)
         edge_face_ratio = edges / faces
@@ -347,6 +350,8 @@ class TurningProcessPlan:
         plane = int(surface.get("Plane", 0))
         slenderness = dimensions["length"] / max(dimensions["diameter"], 0.1)
         cone_to_cyl_ratio = cone / max(cyl, 1)
+        thread_name_hint = any(tok in file_name for tok in ("screw", "bolt", "stud", "thread", "anchor"))
+        bore_name_hint = any(tok in file_name for tok in ("bush", "bushing", "sleeve", "ring", "collar", "spacer", "clo"))
 
         drill_like = bool(
             slenderness >= 4.0
@@ -371,10 +376,17 @@ class TurningProcessPlan:
         if torus > 0:
             threading_score += 1
             threading_reasons.append("Relief-like toroidal transitions support thread termination geometry.")
+        if thread_name_hint and cyl >= 1 and slenderness >= 1.2:
+            threading_score += 2
+            threading_reasons.append("Filename + axisymmetric proportions suggest threaded fastener geometry.")
         thread_hard_cue = cone > 0 or torus > 0
         if threading_score > 1 and not thread_hard_cue:
-            threading_score = 1
-            threading_reasons.append("No lead-in/relief cue found (cone/torus), suppressing likely threading false positive.")
+            if thread_name_hint:
+                threading_score = max(threading_score, 2)
+                threading_reasons.append("Thread-name hint retained despite weak cone/torus cues (common in simplified AP214 exports).")
+            else:
+                threading_score = 1
+                threading_reasons.append("No lead-in/relief cue found (cone/torus), suppressing likely threading false positive.")
         if drill_like:
             threading_score = 0
             threading_reasons = ["Drill-like profile detected; suppressing external threading false positive."]
@@ -405,6 +417,12 @@ class TurningProcessPlan:
         if cyl >= 6 and edge_face_ratio >= 2.2 and slenderness <= 6.0:
             boring_score += 1
             boring_reasons.append("Cylindrical density with moderate edge complexity suggests bore-like geometry.")
+        if cyl >= 3 and plane >= 2 and edge_face_ratio >= 3.0 and slenderness <= 2.5:
+            boring_score += 2
+            boring_reasons.append("Multiple concentric cylindrical loops suggest through-bore / ID turning.")
+        if bore_name_hint and cyl >= 2 and slenderness <= 3.0:
+            boring_score += 1
+            boring_reasons.append("Filename hint and concentric cylindrical surfaces suggest bore finishing.")
         if drill_like:
             boring_score = 0
             boring_reasons = ["Drill-like profile detected; suppressing internal boring false positive."]
@@ -486,6 +504,7 @@ class TurningProcessPlan:
                 "slenderness_ratio": round(slenderness, 2),
                 "cone_to_cylinder_ratio": round(cone_to_cyl_ratio, 2),
                 "drill_like": drill_like,
+                "thread_name_hint": thread_name_hint,
             },
         }
 
@@ -542,7 +561,10 @@ class TurningProcessPlan:
         if feature_name == "threading":
             # Threading false positives are common when there is no lead-in/relief cue.
             hard_cue = int(metrics.get("cone_surfaces", 0)) > 0 or int(metrics.get("torus_surfaces", 0)) > 0
+            thread_name_hint = bool(metrics.get("thread_name_hint", False))
             min_rank = 2 if (self.strict_turnable or self.is_legacy_step) else 3
+            if thread_name_hint and confidence_rank >= 2:
+                return True
             return bool(hard_cue and confidence_rank >= min_rank)
 
         if feature_name == "grooving":

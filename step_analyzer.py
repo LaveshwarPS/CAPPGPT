@@ -809,6 +809,12 @@ def analyze_machinability(
         dominant_support_ratio >= 0.60
         or (not axis_fit["available"] and envelope_axisymmetric_relaxed and envelope_axis_support)
     )
+    slender_turning_ok = bool(
+        aspect_ratio <= 22.0
+        and axisymmetric_relaxed
+        and circular_edge_ratio >= 0.10
+        and rotational_face_ratio >= 0.20
+    )
 
     strict_checks = {
         # Use best-fit rotational axis from geometry, not global XYZ assumptions.
@@ -826,7 +832,7 @@ def analyze_machinability(
             complex_surfaces > (55 if is_legacy_step else 40)
             and complexity_ratio > (0.80 if is_legacy_step else 0.75)
         ),
-        "reasonable_aspect_ratio": 0.2 <= aspect_ratio <= 12.0,
+        "reasonable_aspect_ratio": (0.2 <= aspect_ratio <= 12.0) or slender_turning_ok,
     }
 
     if strict_checks["axisymmetric_xy"]:
@@ -888,6 +894,10 @@ def analyze_machinability(
         turning_reasons.append(f"Too many complex/freeform surfaces for strict turning ({complex_surfaces}, ratio {complexity_ratio:.2f}).")
 
     if strict_checks["reasonable_aspect_ratio"]:
+        if aspect_ratio > 12.0:
+            turning_reasons.append(
+                f"High slenderness ({aspect_ratio:.2f}:1) accepted for between-centers/tailstock turning."
+            )
         turning_score += 10
         turning_reasons.append(f"Aspect ratio {aspect_ratio:.2f}:1 is reasonable for turning.")
     else:
